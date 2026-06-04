@@ -1,18 +1,48 @@
 :root {
   color-scheme: light;
-  --bg: #f6f7f9;
-  --panel: #ffffff;
-  --panel-strong: #f0f4f8;
-  --text: #17202a;
-  --muted: #627084;
-  --line: #d8e0ea;
-  --brand: #115e67;
-  --brand-strong: #0d4850;
-  --accent: #7a4d13;
-  --good: #137a4b;
-  --warn: #9a6500;
-  --bad: #b42318;
-  --shadow: 0 12px 28px rgba(20, 31, 43, 0.08);
+  --kcx-ui-font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --kcx-ui-radius-sm: 6px;
+  --kcx-ui-radius-md: 8px;
+  --kcx-ui-radius-lg: 12px;
+  --kcx-ui-shadow-sm: 0 1px 2px rgba(15, 35, 64, 0.06);
+  --kcx-ui-shadow-md: 0 18px 44px rgba(15, 35, 64, 0.12);
+  --kcx-ui-color-page: #f6f8fb;
+  --kcx-ui-color-surface: #ffffff;
+  --kcx-ui-color-surface-muted: #eef4fb;
+  --kcx-ui-color-border: #d8e0ea;
+  --kcx-ui-color-border-strong: #b8c7d9;
+  --kcx-ui-color-text: #172033;
+  --kcx-ui-color-muted: #5c6b7c;
+  --kcx-ui-color-primary: #0f5fb8;
+  --kcx-ui-color-primary-strong: #123d75;
+  --kcx-ui-color-primary-soft: #e7f1fc;
+  --kcx-ui-focus-ring: 0 0 0 3px rgba(15, 95, 184, 0.34);
+  --kcx-ui-color-success: #13795b;
+  --kcx-ui-color-success-soft: #e6f4ef;
+  --kcx-ui-color-warning: #9a5b00;
+  --kcx-ui-color-warning-soft: #fff4df;
+  --kcx-ui-color-danger: #b42318;
+  --kcx-ui-color-danger-soft: #fff0ee;
+  --bg: var(--kcx-ui-color-page);
+  --panel: var(--kcx-ui-color-surface);
+  --panel-strong: var(--kcx-ui-color-surface-muted);
+  --text: var(--kcx-ui-color-text);
+  --muted: var(--kcx-ui-color-muted);
+  --line: var(--kcx-ui-color-border);
+  --brand: var(--kcx-ui-color-primary);
+  --brand-strong: var(--kcx-ui-color-primary-strong);
+  --accent: var(--kcx-ui-color-warning);
+  --good: var(--kcx-ui-color-success);
+  --warn: var(--kcx-ui-color-warning);
+  --bad: var(--kcx-ui-color-danger);
+  --shadow: var(--kcx-ui-shadow-sm);
+  font-family: var(--kcx-ui-font-sans);
+  color: var(--kcx-ui-color-text);
+  background: var(--kcx-ui-color-page);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 * {
@@ -24,7 +54,7 @@ body {
   min-width: 1080px;
   background: var(--bg);
   color: var(--text);
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--kcx-ui-font-sans);
   font-size: 14px;
   letter-spacing: 0;
 }
@@ -37,7 +67,7 @@ select {
 
 button {
   border: 1px solid var(--brand);
-  border-radius: 6px;
+  border-radius: var(--kcx-ui-radius-md);
   background: var(--brand);
   color: #fff;
   min-height: 36px;
@@ -47,6 +77,13 @@ button {
 
 button:hover {
   background: var(--brand-strong);
+}
+
+button:focus-visible,
+input:focus,
+select:focus {
+  outline: none;
+  box-shadow: var(--kcx-ui-focus-ring);
 }
 
 button:disabled {
@@ -70,7 +107,7 @@ select {
   width: 100%;
   min-height: 36px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--kcx-ui-radius-md);
   background: #fff;
   color: var(--text);
   padding: 0 10px;
@@ -92,7 +129,8 @@ label span {
   gap: 24px;
   height: 72px;
   border-bottom: 1px solid var(--line);
-  background: #fff;
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(12px);
   padding: 0 24px;
 }
 
@@ -134,7 +172,7 @@ label span {
 .panel {
   min-height: 0;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--kcx-ui-radius-lg);
   background: var(--panel);
   box-shadow: var(--shadow);
   padding: 16px;
@@ -170,7 +208,7 @@ label span {
   grid-template-columns: minmax(0, 1fr) 92px;
   gap: 8px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--kcx-ui-radius-md);
   background: #fbfcfd;
   padding: 10px;
 }
@@ -241,7 +279,7 @@ label span {
 
 .compact-list li {
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--kcx-ui-radius-sm);
   padding: 8px;
   background: #fff;
   cursor: pointer;

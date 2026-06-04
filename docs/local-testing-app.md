@@ -2,6 +2,23 @@
 
 KCXDocumentor includes a tiny Python stdlib server for early end-to-end testing. It serves any static UI placed in `web/` and exposes JSON APIs that wrap the existing processing, guide-draft, and DOCX scripts.
 
+## UI Standard
+
+The current prototype is a local web console. If this evolves into a thicker Windows client or a full web client, the visual language should still follow the read-only `CustomerAppUI` reference project.
+
+Current local CSS uses the CustomerAppUI semantic token model as the source of truth:
+
+- `--kcx-ui-color-page`
+- `--kcx-ui-color-surface`
+- `--kcx-ui-color-border`
+- `--kcx-ui-color-text`
+- `--kcx-ui-color-muted`
+- `--kcx-ui-color-primary`
+- `--kcx-ui-radius-*`
+- `--kcx-ui-shadow-*`
+
+Avoid one-off palettes or component forks. New controls should map to CustomerAppUI-style primitives: panels, buttons, status badges, form fields, top/app shell, and layout grids.
+
 Run it from the repo root:
 
 ```bash
