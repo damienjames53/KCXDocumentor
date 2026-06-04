@@ -70,11 +70,24 @@ def as_list(value: Any) -> list[str]:
     if value is None:
         return []
     if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
+        return [stringify_list_item(item) for item in value if stringify_list_item(item)]
     if isinstance(value, tuple):
-        return [str(item).strip() for item in value if str(item).strip()]
+        return [stringify_list_item(item) for item in value if stringify_list_item(item)]
     text = str(value).strip()
     return [text] if text else []
+
+
+def stringify_list_item(item: Any) -> str:
+    if isinstance(item, dict):
+        parts = []
+        for key in ("id", "severity", "category", "description", "resolution", "message", "title"):
+            value = item.get(key)
+            if value is not None and str(value).strip():
+                label = key.replace("_", " ").title()
+                parts.append(f"{label}: {str(value).strip()}")
+        if parts:
+            return " | ".join(parts)
+    return str(item).strip()
 
 
 def pick_value(source: dict[str, Any], *keys: str) -> Any:
@@ -140,16 +153,16 @@ def first_existing_image(step: dict[str, Any], input_path: Path) -> tuple[Path |
 def normalize_step(step: dict[str, Any], index: int, input_path: Path) -> GuideStep:
     screenshot, caption = first_existing_image(step, input_path)
     transcript = text_value(step, "speaker_text", "speakerText", "transcript", "narration", "description")
-    action = text_value(step, "action", "instruction", "intent", "stepTextPlaceholder", default=transcript)
+    action = text_value(step, "action", "instruction", "intent", "stepTextPlaceholder", "body", default=transcript)
     title = text_value(step, "title", "name", "shellId", default=f"Step {index}")
     expected_result = text_value(step, "expected_result", "expectedResult", "result", "outcome")
     return GuideStep(
         title=title,
         action=action,
         expected_result=expected_result,
-        notes=as_list(step.get("notes") or step.get("warnings")),
+        notes=as_list(step.get("notes") or step.get("warnings") or step.get("reviewNotes")),
         ui_text=as_list(pick_value(step, "visible_ui_text", "visibleUiText", "ui_text", "uiText", "ocr_text", "ocrText", "confirmedUiLabels")),
-        action_hints=as_list(pick_value(step, "action_hints", "actionHints", "events", "actionHint")),
+        action_hints=as_list(pick_value(step, "action_hints", "actionHints", "events", "actionHint", "actionHints")),
         transcript=transcript,
         start=text_value(step, "start", "start_time"),
         end=text_value(step, "end", "end_time"),
@@ -168,6 +181,7 @@ def normalize_input(data: dict[str, Any], input_path: Path) -> GuideDraft:
     session = data.get("session") if isinstance(data.get("session"), dict) else {}
     recording = data.get("recording") if isinstance(data.get("recording"), dict) else {}
     metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
 
     raw_steps = data.get("steps")
     if not isinstance(raw_steps, list):
@@ -178,6 +192,8 @@ def normalize_input(data: dict[str, Any], input_path: Path) -> GuideDraft:
         raw_steps = data.get("confirmedSteps")
     if not isinstance(raw_steps, list) or not raw_steps:
         raw_steps = data.get("pendingStepShells")
+    if not isinstance(raw_steps, list) or not raw_steps:
+        raw_steps = flatten_section_steps(data)
     if not isinstance(raw_steps, list):
         raise ValueError("Input JSON must contain a steps, procedure_steps, or segments array.")
 
@@ -212,7 +228,7 @@ def normalize_input(data: dict[str, Any], input_path: Path) -> GuideDraft:
         "Application": text_value(
             recording,
             "targetApplication",
-            default=text_value(session, "app_name", default=text_value(metadata, "app_name", default="Not specified")),
+            default=text_value(meta, "targetApplication", default=text_value(session, "app_name", default=text_value(metadata, "app_name", default="Not specified"))),
         ),
         "Recording Duration": text_value(
             recording,
@@ -220,14 +236,26 @@ def normalize_input(data: dict[str, Any], input_path: Path) -> GuideDraft:
             default=text_value(session, "duration_sec", "duration", default=text_value(metadata, "duration", default="Not specified")),
         ),
         "Recorded At": text_value(session, "recorded_at", default=text_value(metadata, "recorded_at", default="Not specified")),
-        "Source Recording": text_value(recording, "sourceFile", default=str(input_path)),
+        "Source Recording": text_value(recording, "sourceFile", default=text_value(meta, "sessionId", default=str(input_path))),
         "Input File": str(input_path),
     }
+
+    review_notes = (
+        as_list(data.get("review_notes") or document.get("review_notes"))
+        + as_list(data.get("warnings"))
+        + as_list(data.get("assumptions"))
+        + as_list(data.get("openReviewItems"))
+    )
+    summary = text_value(
+        data.get("introduction") if isinstance(data.get("introduction"), dict) else {},
+        "text",
+        default=summary,
+    )
 
     return GuideDraft(
         title=title,
         version=version,
-        status=status,
+        status=text_value(meta, "draftStatus", default=status),
         owner=owner,
         effective_date=effective_date,
         summary=summary,
@@ -241,10 +269,35 @@ def normalize_input(data: dict[str, Any], input_path: Path) -> GuideDraft:
         ),
         expected_results=as_list(data.get("expected_results") or document.get("expected_results")),
         troubleshooting=as_list(data.get("troubleshooting") or document.get("troubleshooting")),
-        review_notes=as_list(data.get("review_notes") or document.get("review_notes")),
+        review_notes=review_notes,
         source_metadata=source_metadata,
         steps=[normalize_step(step, idx + 1, input_path) for idx, step in enumerate(raw_steps) if isinstance(step, dict)],
     )
+
+
+def flatten_section_steps(data: dict[str, Any]) -> list[dict[str, Any]]:
+    sections = data.get("sections")
+    if not isinstance(sections, list):
+        return []
+    flattened: list[dict[str, Any]] = []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        section_title = text_value(section, "title", default="Guide Section")
+        steps = section.get("steps")
+        if isinstance(steps, list) and steps:
+            for step in steps:
+                if not isinstance(step, dict):
+                    continue
+                enriched = dict(step)
+                step_number = text_value(enriched, "stepNumber", default=str(len(flattened) + 1))
+                enriched.setdefault("title", f"{section_title}: Step {step_number}")
+                flattened.append(enriched)
+            continue
+        body_items = as_list(section.get("body") or section.get("bullets") or section.get("summary"))
+        for item in body_items:
+            flattened.append({"title": section_title, "instruction": item})
+    return flattened
 
 
 def section_body(data: dict[str, Any], title: str) -> list[str]:

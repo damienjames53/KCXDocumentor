@@ -152,6 +152,64 @@ def test_document_helper_can_build_minimal_docx_shell(tmp_path: Path) -> None:
         assert "word/document.xml" in package.namelist()
 
 
+def test_build_guide_docx_accepts_section_based_anthropic_shape(tmp_path: Path) -> None:
+    input_path = tmp_path / "section-draft.json"
+    output_path = tmp_path / "section-guide.docx"
+    input_path.write_text(
+        json.dumps(
+            {
+                "title": "SendKey User Guide",
+                "meta": {
+                    "draftStatus": "requires-human-review",
+                    "sessionId": "sendkey-demo",
+                    "targetApplication": "SendKey",
+                },
+                "introduction": {
+                    "text": "SendKey provides communication methods for application users.",
+                },
+                "sections": [
+                    {
+                        "title": "Overview of Communication Methods",
+                        "steps": [
+                            {
+                                "instruction": "Note that SendKey supports fax, SMS messaging, email, and voice messaging.",
+                                "visibleUiText": ["SendKey"],
+                                "reviewNotes": ["Confirm labels against OCR before publishing."],
+                            }
+                        ],
+                    }
+                ],
+                "openReviewItems": [
+                    {
+                        "id": "review-001",
+                        "severity": "blocking",
+                        "description": "Screenshots require human approval.",
+                        "resolution": "Approve candidate frames.",
+                    }
+                ],
+                "model": {"provider": "anthropic"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "build_guide_docx.py"), str(input_path), "--output", str(output_path)],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert output_path.exists()
+    doc = Document(output_path)
+    text = "\n".join(paragraph.text for paragraph in doc.paragraphs)
+    assert "Overview of Communication Methods" in text
+    assert "Note that SendKey supports fax" in text
+    assert "Screenshots require human approval" in text
+
+
 def test_compact_procedure_trace_contract_for_one_hour_recordings(tmp_path: Path) -> None:
     trace_path = tmp_path / "procedure_trace.json"
     trace = {
