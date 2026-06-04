@@ -749,9 +749,14 @@ function setApiStatus(text, stateName) {
 function setToolStatus(health) {
   const ffmpeg = Boolean(health?.tools?.ffmpeg?.available);
   const ffprobe = Boolean(health?.tools?.ffprobe?.available);
-  if (ffmpeg && ffprobe) {
-    els.toolStatus.textContent = "Media tools ready";
+  const whisper = Boolean(health?.tools?.whisper?.available);
+  const whisperModel = Boolean(health?.tools?.whisper?.modelAvailable);
+  if (ffmpeg && ffprobe && whisper && whisperModel) {
+    els.toolStatus.textContent = "Local pipeline ready";
     els.toolStatus.className = "status-pill good";
+  } else if (ffmpeg && ffprobe) {
+    els.toolStatus.textContent = "Media ready, STT missing";
+    els.toolStatus.className = "status-pill warn";
   } else {
     els.toolStatus.textContent = "Media tools missing";
     els.toolStatus.className = "status-pill warn";

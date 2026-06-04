@@ -103,11 +103,11 @@ Runs `scripts/process_recording.py`.
   "transcript": "example.vtt",
   "targetApplication": "Enterprise Rx",
   "sessionId": "local-test",
-  "noMediaTools": true
+  "noMediaTools": false
 }
 ```
 
-The `transcript` property is optional. When provided, it should be passed through to `scripts/process_recording.py --transcript` so the first real-video tests can use a human or vendor-produced transcript before local STT is fully wired.
+The `transcript` property is optional. When provided, it is passed through to `scripts/process_recording.py --transcript` and takes precedence over local STT. When omitted, the processing script extracts narration audio with FFmpeg and runs local `whisper-cli` using the repo-local model at `models/whisper/ggml-base.en.bin`.
 
 `POST /api/generate-draft`
 

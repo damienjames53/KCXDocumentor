@@ -7,7 +7,7 @@ Use this checklist for the first real recording before attempting a full one-hou
 - Start with a 3 to 10 minute recording, not the one-hour source.
 - Prefer MP4 or MKV with clear microphone narration.
 - Place the video in `samples/raw/`.
-- If available, place a plain-text transcript sidecar next to it or anywhere local.
+- If available, place a plain-text transcript sidecar next to it or anywhere local. If not, the prototype will use local Whisper transcription.
 - Use a target application name that should appear in the generated guide, such as `Enterprise Rx`.
 
 ## 2. Confirm Local Tools
@@ -17,13 +17,16 @@ Run:
 ```bash
 ffmpeg -version
 ffprobe -version
+whisper-cli --help
+test -f models/whisper/ggml-base.en.bin
 .venv/bin/python -m pytest tests/test_app_server.py tests/test_prototype_scripts.py
 ```
 
 Expected:
 
 - `ffmpeg` and `ffprobe` are installed and visible on `PATH`.
-- Tests do not require a real video, network access, Anthropic, OCR, or local STT.
+- `whisper-cli` is installed and `models/whisper/ggml-base.en.bin` exists for no-sidecar transcription.
+- Tests do not require a real video, network access, Anthropic, OCR, or a full local STT run.
 - Skipped app-server tests are acceptable only for helper surfaces that have not been implemented yet.
 
 ## 3. Process the Short Video
@@ -62,6 +65,7 @@ Check:
 
 - `media_metadata.json` reports `durationSource: ffprobe`.
 - `transcript.json` uses `sidecar-transcript` if a sidecar was provided.
+- `transcript.json` uses `local-whisper` if no sidecar was provided and Whisper succeeded.
 - `procedure_trace.json` has reasonable segment timestamps.
 - Segments include confidence fields and review reasons.
 - Candidate frames are bounded and do not explode token or storage cost.

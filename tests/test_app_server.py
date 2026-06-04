@@ -240,6 +240,8 @@ def test_health_or_tooling_helper_reports_expected_local_dependencies() -> None:
     serialized = json.dumps(status).lower()
     assert "ffmpeg" in serialized
     assert "ffprobe" in serialized
+    assert "whisper" in serialized
+    assert "modelavailable" in serialized
     if "anthropic" in serialized or "api" in serialized:
         assert "sk-ant-" not in serialized
     assert "ok" in status or "ready" in status or "tools" in status or "dependencies" in status

@@ -44,6 +44,7 @@ ACTION_WORDS = {
 class Tooling:
     ffprobe: str | None
     ffmpeg: str | None
+    whisper: str | None
 
 
 def main() -> int:
@@ -54,7 +55,7 @@ def main() -> int:
         return 2
 
     output_root = args.output_root.expanduser().resolve()
-    tooling = find_tooling(disabled=args.no_media_tools)
+    tooling = find_tooling(disabled=args.no_media_tools, whisper_cli=args.whisper_cli)
     session_id = args.session_id or build_session_id(source)
     session_dir = output_root / session_id
 
@@ -70,16 +71,22 @@ def main() -> int:
 
     create_session_dirs(session_dir)
 
+    extracted_audio = maybe_extract_audio(source, session_dir, tooling, args)
     metadata = inspect_media(source, tooling, args.assume_duration_seconds)
     sidecar_transcript = read_sidecar_transcript(args.transcript)
+    local_transcript = (
+        None
+        if sidecar_transcript
+        else maybe_transcribe_audio(session_dir, extracted_audio, tooling, args)
+    )
     transcript = build_transcript(
         metadata=metadata,
         sidecar_transcript=sidecar_transcript,
+        local_transcript=local_transcript,
         segment_seconds=args.segment_seconds,
         target_application=args.target_application,
     )
 
-    extracted_audio = maybe_extract_audio(source, session_dir, tooling, args)
     frames = maybe_extract_frames(source, session_dir, tooling, metadata, args)
     frame_scores = score_frames(frames, metadata, args.sample_interval_seconds)
     ocr = build_placeholder_ocr(frame_scores, args.target_application)
@@ -103,7 +110,9 @@ def main() -> int:
         "tools": {
             "ffprobe": tooling.ffprobe,
             "ffmpeg": tooling.ffmpeg,
+            "whisper": tooling.whisper,
             "mediaToolsDisabled": args.no_media_tools,
+            "localSttDisabled": args.no_local_stt,
         },
         "outputs": {
             "mediaMetadata": "media_metadata.json",
@@ -116,6 +125,7 @@ def main() -> int:
         "inputs": {
             "recording": str(source),
             "transcript": sidecar_transcript["path"] if sidecar_transcript else None,
+            "localTranscript": local_transcript["path"] if local_transcript else None,
         },
     }
 
@@ -194,6 +204,33 @@ def parse_args() -> argparse.Namespace:
         help="Per-command timeout for optional ffmpeg extraction calls.",
     )
     parser.add_argument(
+        "--whisper-cli",
+        default=None,
+        help="Path to whisper.cpp CLI. Defaults to whisper-cli on PATH.",
+    )
+    parser.add_argument(
+        "--whisper-model",
+        type=Path,
+        default=REPO_ROOT / "models" / "whisper" / "ggml-base.en.bin",
+        help="Path to a local whisper.cpp GGML model.",
+    )
+    parser.add_argument(
+        "--whisper-language",
+        default="en",
+        help="Language code passed to whisper.cpp. Defaults to en.",
+    )
+    parser.add_argument(
+        "--whisper-timeout-seconds",
+        type=float,
+        default=7200.0,
+        help="Timeout for local Whisper transcription.",
+    )
+    parser.add_argument(
+        "--no-local-stt",
+        action="store_true",
+        help="Skip local Whisper transcription when no sidecar transcript is provided.",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Replace an existing session directory with the same id.",
@@ -201,10 +238,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def find_tooling(disabled: bool) -> Tooling:
+def find_tooling(disabled: bool, whisper_cli: str | None = None) -> Tooling:
+    whisper = str(Path(whisper_cli).expanduser()) if whisper_cli else shutil.which("whisper-cli")
     if disabled:
-        return Tooling(ffprobe=None, ffmpeg=None)
-    return Tooling(ffprobe=shutil.which("ffprobe"), ffmpeg=shutil.which("ffmpeg"))
+        return Tooling(ffprobe=None, ffmpeg=None, whisper=whisper)
+    return Tooling(ffprobe=shutil.which("ffprobe"), ffmpeg=shutil.which("ffmpeg"), whisper=whisper)
 
 
 def build_session_id(source: Path) -> str:
@@ -316,6 +354,130 @@ def read_sidecar_transcript(path: Path | None) -> dict[str, Any] | None:
     }
 
 
+def maybe_transcribe_audio(
+    session_dir: Path,
+    extracted_audio: dict[str, Any],
+    tooling: Tooling,
+    args: argparse.Namespace,
+) -> dict[str, Any] | None:
+    if args.no_local_stt:
+        return None
+    if not extracted_audio.get("created"):
+        return None
+    if not tooling.whisper:
+        return None
+
+    model = args.whisper_model.expanduser().resolve()
+    if not model.exists() or not model.is_file():
+        return {
+            "path": None,
+            "name": None,
+            "format": "json",
+            "source": "local-whisper-error",
+            "error": f"Whisper model not found: {model}",
+            "segments": [],
+        }
+
+    audio_path = session_dir / str(extracted_audio["path"])
+    output_base = session_dir / "audio" / "whisper-transcript"
+    command = [
+        tooling.whisper,
+        "-m",
+        str(model),
+        "-f",
+        str(audio_path),
+        "-l",
+        args.whisper_language,
+        "-oj",
+        "-ojf",
+        "-of",
+        str(output_base),
+        "--no-prints",
+    ]
+    result = run_command(command, timeout_seconds=args.whisper_timeout_seconds)
+    output_path = output_base.with_suffix(".json")
+    if result["returnCode"] != 0 or not output_path.exists():
+        return {
+            "path": str(output_path.relative_to(session_dir)),
+            "name": output_path.name,
+            "format": "json",
+            "source": "local-whisper-error",
+            "error": result["stderr"] or f"whisper-cli exited {result['returnCode']}",
+            "segments": [],
+        }
+
+    try:
+        payload = json.loads(output_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return {
+            "path": str(output_path.relative_to(session_dir)),
+            "name": output_path.name,
+            "format": "json",
+            "source": "local-whisper-error",
+            "error": f"whisper-cli returned invalid JSON: {exc}",
+            "segments": [],
+        }
+
+    return {
+        "path": str(output_path.relative_to(session_dir)),
+        "name": output_path.name,
+        "format": "json",
+        "source": "local-whisper",
+        "model": str(model),
+        "language": payload.get("result", {}).get("language") or args.whisper_language,
+        "error": None,
+        "segments": parse_whisper_transcript(payload),
+    }
+
+
+def parse_whisper_transcript(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    segments = []
+    raw_segments = payload.get("transcription")
+    if not isinstance(raw_segments, list):
+        return segments
+
+    for index, item in enumerate(raw_segments):
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text", "")).strip()
+        if not text:
+            continue
+        offsets = item.get("offsets") if isinstance(item.get("offsets"), dict) else {}
+        start = milliseconds_to_seconds(offsets.get("from"))
+        end = milliseconds_to_seconds(offsets.get("to"))
+        segments.append(
+            {
+                "id": f"whisper-{index + 1:04d}",
+                "text": text,
+                "startSeconds": start,
+                "endSeconds": end,
+                "confidence": whisper_segment_confidence(item),
+                "speaker": "Speaker 1",
+            }
+        )
+    return segments
+
+
+def whisper_segment_confidence(segment: dict[str, Any]) -> float:
+    tokens = segment.get("tokens") if isinstance(segment.get("tokens"), list) else []
+    probabilities = [
+        parse_float(token.get("p"))
+        for token in tokens
+        if isinstance(token, dict) and not str(token.get("text", "")).startswith("[_")
+    ]
+    probabilities = [value for value in probabilities if value is not None]
+    if not probabilities:
+        return 0.74
+    return round(min(1.0, max(0.0, sum(probabilities) / len(probabilities))), 3)
+
+
+def milliseconds_to_seconds(value: Any) -> float | None:
+    parsed = parse_float(value)
+    if parsed is None:
+        return None
+    return parsed / 1000.0
+
+
 def parse_json_transcript(raw_text: str) -> list[dict[str, Any]]:
     try:
         payload = json.loads(raw_text)
@@ -392,24 +554,26 @@ def parse_caption_transcript(raw_text: str) -> list[dict[str, Any]]:
 def build_transcript(
     metadata: dict[str, Any],
     sidecar_transcript: dict[str, Any] | None,
+    local_transcript: dict[str, Any] | None,
     segment_seconds: float,
     target_application: str,
 ) -> dict[str, Any]:
     duration = metadata["durationSeconds"]
     segment_count = max(1, math.ceil(duration / max(1.0, segment_seconds)))
-    sidecar_segments = sidecar_transcript.get("segments", []) if sidecar_transcript else []
-    if sidecar_segments:
-        segment_count = choose_sidecar_segment_count(sidecar_segments, segment_count)
-    sidecar_chunks = split_sidecar_segments(sidecar_segments, segment_count) if sidecar_segments else []
+    transcript_source = choose_transcript_source(sidecar_transcript, local_transcript)
+    source_segments = transcript_source.get("segments", []) if transcript_source else []
+    if source_segments:
+        segment_count = choose_source_segment_count(source_segments, segment_count)
+    source_chunks = split_source_segments(source_segments, segment_count) if source_segments else []
     segments = []
 
     for index in range(segment_count):
         start = index * segment_seconds
         end = min(duration, (index + 1) * segment_seconds)
-        sidecar_chunk = sidecar_chunks[index] if sidecar_chunks else None
-        text = sidecar_chunk["text"] if sidecar_chunk else placeholder_transcript_text(index, target_application)
-        segment_start = sidecar_chunk.get("startSeconds") if sidecar_chunk and sidecar_chunk.get("startSeconds") is not None else start
-        segment_end = sidecar_chunk.get("endSeconds") if sidecar_chunk and sidecar_chunk.get("endSeconds") is not None else end
+        source_chunk = source_chunks[index] if source_chunks else None
+        text = source_chunk["text"] if source_chunk else placeholder_transcript_text(index, target_application)
+        segment_start = source_chunk.get("startSeconds") if source_chunk and source_chunk.get("startSeconds") is not None else start
+        segment_end = source_chunk.get("endSeconds") if source_chunk and source_chunk.get("endSeconds") is not None else end
         segments.append(
             {
                 "id": f"tx-{index + 1:04d}",
@@ -417,37 +581,55 @@ def build_transcript(
                 "endSeconds": round_positive(segment_end),
                 "start": format_timestamp(segment_start),
                 "end": format_timestamp(segment_end),
-                "speaker": sidecar_chunk.get("speaker", "Speaker 1") if sidecar_chunk else "Speaker 1",
+                "speaker": source_chunk.get("speaker", "Speaker 1") if source_chunk else "Speaker 1",
                 "text": text,
-                "source": "sidecar-transcript" if sidecar_chunk else "deterministic-placeholder",
-                "confidence": sidecar_chunk["confidence"] if sidecar_chunk else 0.0,
+                "source": transcript_source["source"] if source_chunk and transcript_source else "deterministic-placeholder",
+                "confidence": source_chunk["confidence"] if source_chunk else 0.0,
             }
         )
 
+    source_transcript = (
+        {
+            "name": transcript_source.get("name"),
+            "path": transcript_source.get("path"),
+            "format": transcript_source.get("format"),
+            "source": transcript_source.get("source"),
+            "model": transcript_source.get("model"),
+            "error": transcript_source.get("error"),
+        }
+        if transcript_source
+        else None
+    )
+
     return {
         "schemaVersion": 1,
-        "source": "sidecar-transcript" if sidecar_segments else "deterministic-placeholder",
-        "sourceTranscript": {
-            "name": sidecar_transcript.get("name"),
-            "path": sidecar_transcript.get("path"),
-            "format": sidecar_transcript.get("format"),
-        }
-        if sidecar_transcript
-        else None,
-        "language": "en",
+        "source": transcript_source["source"] if source_segments and transcript_source else "deterministic-placeholder",
+        "sourceTranscript": source_transcript,
+        "language": transcript_source.get("language", "en") if transcript_source else "en",
         "durationSeconds": duration,
         "segments": segments,
     }
 
 
-def split_sidecar_segments(sidecar_segments: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
-    if not sidecar_segments:
-        return []
-    if len(sidecar_segments) >= count and any(segment.get("startSeconds") is not None for segment in sidecar_segments):
-        return normalize_sidecar_segments(sidecar_segments[:count])
+def choose_transcript_source(
+    sidecar_transcript: dict[str, Any] | None,
+    local_transcript: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if sidecar_transcript and sidecar_transcript.get("segments"):
+        return {**sidecar_transcript, "source": "sidecar-transcript"}
+    if local_transcript and local_transcript.get("segments"):
+        return local_transcript
+    return None
 
-    text = " ".join(str(segment.get("text", "")).strip() for segment in sidecar_segments)
-    confidence = min((parse_confidence(segment.get("confidence")) for segment in sidecar_segments), default=0.78)
+
+def split_source_segments(source_segments: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
+    if not source_segments:
+        return []
+    if len(source_segments) >= count and any(segment.get("startSeconds") is not None for segment in source_segments):
+        return normalize_source_segments(source_segments[:count])
+
+    text = " ".join(str(segment.get("text", "")).strip() for segment in source_segments)
+    confidence = min((parse_confidence(segment.get("confidence")) for segment in source_segments), default=0.78)
     words = text.split()
     if not words:
         return []
@@ -461,22 +643,22 @@ def split_sidecar_segments(sidecar_segments: list[dict[str, Any]], count: int) -
     return chunks[:count]
 
 
-def choose_sidecar_segment_count(sidecar_segments: list[dict[str, Any]], default_count: int) -> int:
+def choose_source_segment_count(source_segments: list[dict[str, Any]], default_count: int) -> int:
     if default_count <= 4:
         return default_count
 
-    timed_count = sum(1 for segment in sidecar_segments if segment.get("startSeconds") is not None)
+    timed_count = sum(1 for segment in source_segments if segment.get("startSeconds") is not None)
     if timed_count:
         return max(1, min(default_count, timed_count))
 
-    word_count = sum(len(str(segment.get("text", "")).split()) for segment in sidecar_segments)
+    word_count = sum(len(str(segment.get("text", "")).split()) for segment in source_segments)
     transcript_sized_count = max(1, math.ceil(word_count / 120))
     return max(1, min(default_count, transcript_sized_count))
 
 
-def normalize_sidecar_segments(sidecar_segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def normalize_source_segments(source_segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized = []
-    for segment in sidecar_segments:
+    for segment in source_segments:
         normalized.append(
             {
                 "text": str(segment.get("text", "")).strip(),

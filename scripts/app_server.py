@@ -220,6 +220,8 @@ def describe_raw_file(path: Path) -> dict[str, Any]:
 def get_health() -> dict[str, Any]:
     ffmpeg = shutil.which("ffmpeg")
     ffprobe = shutil.which("ffprobe")
+    whisper = shutil.which("whisper-cli")
+    whisper_model = WORKSPACE / "models" / "whisper" / "ggml-base.en.bin"
     return {
         "status": "ok",
         "workspace": str(WORKSPACE),
@@ -234,6 +236,12 @@ def get_health() -> dict[str, Any]:
             "ffprobe": {
                 "available": bool(ffprobe),
                 "path": ffprobe,
+            },
+            "whisper": {
+                "available": bool(whisper),
+                "path": whisper,
+                "modelAvailable": whisper_model.exists(),
+                "modelPath": relative_to_workspace(whisper_model),
             },
         },
     }

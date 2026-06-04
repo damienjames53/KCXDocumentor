@@ -293,6 +293,73 @@ def test_process_recording_accepts_sidecar_transcript_without_media_tools(tmp_pa
     assert trace_payload["segments"][0]["confidence"]["needsHumanReview"] is True
 
 
+def test_whisper_json_segments_include_offsets_and_confidence() -> None:
+    module = load_module(PROCESS_RECORDING_SCRIPT, "process_recording_whisper_parser")
+    payload = {
+        "result": {"language": "en"},
+        "transcription": [
+            {
+                "offsets": {"from": 1200, "to": 5400},
+                "text": " Click Save to finish the workflow.",
+                "tokens": [
+                    {"text": "[_BEG_]", "p": 0.1},
+                    {"text": " Click", "p": 0.9},
+                    {"text": " Save", "p": 0.8},
+                    {"text": ".", "p": 0.7},
+                ],
+            }
+        ],
+    }
+
+    segments = module.parse_whisper_transcript(payload)
+
+    assert segments == [
+        {
+            "id": "whisper-0001",
+            "text": "Click Save to finish the workflow.",
+            "startSeconds": 1.2,
+            "endSeconds": 5.4,
+            "confidence": 0.8,
+            "speaker": "Speaker 1",
+        }
+    ]
+
+
+def test_build_transcript_prefers_local_whisper_when_no_sidecar() -> None:
+    module = load_module(PROCESS_RECORDING_SCRIPT, "process_recording_whisper_transcript")
+    transcript = module.build_transcript(
+        metadata={"durationSeconds": 30.0},
+        sidecar_transcript=None,
+        local_transcript={
+            "source": "local-whisper",
+            "name": "whisper-transcript.json",
+            "path": "audio/whisper-transcript.json",
+            "format": "json",
+            "model": "models/whisper/ggml-base.en.bin",
+            "language": "en",
+            "error": None,
+            "segments": [
+                {
+                    "text": "Open the order screen and select New.",
+                    "startSeconds": 0.0,
+                    "endSeconds": 12.0,
+                    "confidence": 0.87,
+                    "speaker": "Speaker 1",
+                }
+            ],
+        },
+        segment_seconds=60.0,
+        target_application="Enterprise Rx",
+    )
+
+    assert transcript["source"] == "local-whisper"
+    assert transcript["sourceTranscript"]["source"] == "local-whisper"
+    assert transcript["sourceTranscript"]["path"] == "audio/whisper-transcript.json"
+    assert transcript["segments"][0]["source"] == "local-whisper"
+    assert transcript["segments"][0]["confidence"] == 0.87
+    assert "Open the order screen" in transcript["segments"][0]["text"]
+
+
 @pytest.mark.parametrize(
     "relative_path",
     [
@@ -320,3 +387,5 @@ def test_future_prototype_scripts_have_smoke_test_hooks(relative_path: str) -> N
     assert ("--output" in help_text or "--output-root" in help_text)
     if relative_path.endswith("process_recording.py"):
         assert "--no-media-tools" in help_text
+        assert "--whisper-model" in help_text
+        assert "--no-local-stt" in help_text

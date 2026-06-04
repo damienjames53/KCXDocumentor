@@ -2,11 +2,11 @@
 
 This lane turns an imported workstation recording into a local session bundle for downstream guide-generation prototyping.
 
-It is intentionally useful before the complete STT, OCR, and CV stack exists. If `ffprobe` or `ffmpeg` are installed, the script uses them for media metadata, audio extraction, and interval frame extraction. If they are not installed, it still emits deterministic placeholder JSON with the same shape so the AI guide draft, DOCX rendering, and QA work can continue.
+It is intentionally useful before the complete OCR and CV stack exists. If `ffprobe` or `ffmpeg` are installed, the script uses them for media metadata, audio extraction, and interval frame extraction. When no transcript sidecar is provided, it runs local `whisper-cli` against the extracted narration audio when a local model is available. If media or STT tools are not available, it still emits deterministic placeholder JSON with the same shape so the AI guide draft, DOCX rendering, and QA work can continue.
 
 The local app server exposes the same lane for initial video testing:
 
-- `GET /api/health` reports whether `ffmpeg` and `ffprobe` are available.
+- `GET /api/health` reports whether `ffmpeg`, `ffprobe`, `whisper-cli`, and the local Whisper model are available.
 - `GET /api/recordings` lists supported recordings in `samples/raw/`.
 - `GET /api/transcripts` lists `.txt`, `.vtt`, `.srt`, and `.json` transcript sidecars in `samples/raw/`.
 - `POST /api/import-recording` imports a multipart `file` upload into `samples/raw/`.
@@ -26,7 +26,6 @@ Useful options:
 ```bash
 python3 scripts/process_recording.py samples/raw/example.mp4 \
   --target-application "Enterprise Rx" \
-  --transcript samples/raw/example-transcript.txt \
   --segment-seconds 60 \
   --sample-interval-seconds 30 \
   --max-frames 120
@@ -76,9 +75,28 @@ When media tools are missing, candidate images have `created: false` and `path: 
 
 When `ffmpeg` is available, candidate frames are extracted as browser-friendly `.jpg` files under `frames/candidates/`. Frame records include both `path` and `webPath` values relative to the session directory so the app can serve them through `/api/session?sessionId={id}&asset={path}`.
 
+## Local Whisper Transcription
+
+When `--transcript` is not supplied, the processing lane attempts local transcription with `whisper.cpp`:
+
+```bash
+python3 scripts/process_recording.py samples/raw/example.mp4 \
+  --target-application "Enterprise Rx" \
+  --whisper-model models/whisper/ggml-base.en.bin
+```
+
+The default model path is `models/whisper/ggml-base.en.bin`. The generated Whisper JSON is stored at `audio/whisper-transcript.json`, and normalized transcript segments are written into `transcript.json` with `source: local-whisper`.
+
+Useful options:
+
+- `--whisper-cli` points to a specific `whisper-cli` binary.
+- `--whisper-language` defaults to `en`.
+- `--whisper-timeout-seconds` defaults to `7200` for long recordings.
+- `--no-local-stt` skips Whisper and keeps deterministic placeholder transcript output.
+
 ## Transcript Sidecars
 
-The processing lane can use a sidecar transcript before local Whisper transcription is wired in:
+The processing lane can still use a sidecar transcript when one is available. Sidecars take precedence over local Whisper output:
 
 - `.txt` is chunked by word count across the recording duration.
 - `.vtt` and `.srt` captions are parsed into timestamped text segments when timestamps are present.
@@ -99,11 +117,10 @@ That produces about 60 procedure-sized transcript segments and up to 120 frame c
 
 ## Current Prototype Limits
 
-This script does not perform local Whisper transcription, OCR, visual dedupe, blur scoring, or AI summarization yet. It creates the local processing package those lanes will consume.
+This script performs local media extraction and local Whisper transcription, but OCR, visual dedupe, blur scoring, and AI summarization remain prototype lanes. It creates the local processing package those lanes will consume.
 
 Next implementation steps:
 
-- replace placeholder transcript generation with `whisper.cpp` output ingestion
 - replace placeholder OCR with Tesseract frame OCR
 - replace deterministic frame scoring with OpenCV duplicate, blur, and UI-change scoring
 - add a review step for selecting final screenshots before DOCX rendering
