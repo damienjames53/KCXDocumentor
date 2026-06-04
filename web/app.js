@@ -4,6 +4,10 @@ const state = {
   sessions: [],
   selectedSessionId: "",
   session: null,
+  frameReview: {
+    endpointAvailable: null,
+    items: {},
+  },
   activeTab: "trace",
   busy: false,
   lastDraft: "deterministic",
@@ -42,6 +46,11 @@ const els = {
   reviewMetric: document.querySelector("#reviewMetric"),
   imageMetric: document.querySelector("#imageMetric"),
   segmentList: document.querySelector("#segmentList"),
+  frameReviewStatus: document.querySelector("#frameReviewStatus"),
+  addFrameForm: document.querySelector("#addFrameForm"),
+  addFrameTimestamp: document.querySelector("#addFrameTimestamp"),
+  addFrameSegment: document.querySelector("#addFrameSegment"),
+  addFrameButton: document.querySelector("#addFrameButton"),
   frameGrid: document.querySelector("#frameGrid"),
   artifactList: document.querySelector("#artifactList"),
   jsonPreview: document.querySelector("#jsonPreview"),
@@ -61,6 +70,10 @@ function bindEvents() {
   els.importRecordingButton.addEventListener("click", importRecording);
   els.importTranscriptButton.addEventListener("click", importTranscript);
   els.pipelineForm.addEventListener("submit", processRecording);
+  els.addFrameForm.addEventListener("submit", addFrameCandidate);
+  els.frameGrid.addEventListener("click", handleFrameAction);
+  els.frameGrid.addEventListener("change", handleFrameFieldChange);
+  els.frameGrid.addEventListener("input", handleFrameNoteInput);
   els.deterministicDraftButton.addEventListener("click", () => generateDraft(false));
   els.anthropicDraftButton.addEventListener("click", () => generateDraft(true));
   els.buildDocxButton.addEventListener("click", buildDocx);
@@ -305,6 +318,7 @@ async function loadSession(sessionId) {
     const session = await apiGet(`/api/session?sessionId=${encodeURIComponent(sessionId)}`);
     state.session = unwrapSession(session);
     state.selectedSessionId = getSessionId(state.session) || sessionId;
+    await loadFrameReview(state.selectedSessionId);
     setApiStatus("API ready", "good");
     logActivity(`Loaded session ${state.selectedSessionId}.`);
     renderAll();
@@ -318,6 +332,7 @@ async function loadSession(sessionId) {
 
 function selectSession(sessionId, options = {}) {
   state.selectedSessionId = sessionId || "";
+  state.frameReview = { endpointAvailable: null, items: {} };
   els.sessionIdInput.value = state.selectedSessionId;
   renderSessions();
   renderSelectedSessionPill();
@@ -362,6 +377,84 @@ async function apiPostForm(path, formData) {
   return parseApiResponse(response);
 }
 
+async function loadFrameReview(sessionId) {
+  state.frameReview = { endpointAvailable: null, items: {} };
+  if (!sessionId) return;
+
+  try {
+    const review = await apiGet(`/api/frame-review?sessionId=${encodeURIComponent(sessionId)}`);
+    state.frameReview = {
+      endpointAvailable: true,
+      items: normalizeFrameReviewItems(review),
+    };
+  } catch (error) {
+    state.frameReview.endpointAvailable = false;
+    state.frameReview.items = {};
+    if (!/404|not found/i.test(error.message)) {
+      logActivity(`Frame review state unavailable: ${error.message}`, "warn");
+    }
+  }
+}
+
+async function saveFrameReview(frameId) {
+  const sessionId = requireSessionId();
+  if (!sessionId || !frameId) return;
+
+  const review = state.frameReview.items[frameId] || {};
+  try {
+    const result = await apiPost("/api/frame-review", {
+      sessionId,
+      frameId,
+      reviewStatus: review.reviewStatus || "pending",
+      note: review.reviewNote || "",
+      assignedSegmentId: review.assignedSegmentId || "",
+    });
+    state.frameReview.endpointAvailable = true;
+    const savedItems = normalizeFrameReviewItems(result);
+    state.frameReview.items = {
+      ...state.frameReview.items,
+      ...savedItems,
+      [frameId]: {
+        ...review,
+        ...(savedItems[frameId] || {}),
+      },
+    };
+    updateFrameReviewStatus();
+  } catch (error) {
+    state.frameReview.endpointAvailable = false;
+    updateFrameReviewStatus("Review endpoint not available; changes are local until backend support lands.");
+  }
+}
+
+async function addFrameCandidate(event) {
+  event.preventDefault();
+  const sessionId = requireSessionId();
+  if (!sessionId) return;
+
+  const timestamp = els.addFrameTimestamp.value.trim();
+  if (!timestamp) {
+    logActivity("Enter a timestamp before adding a frame candidate.", "warn");
+    return;
+  }
+
+  setBusy(true);
+  try {
+    const result = await apiPost("/api/extract-frame", {
+      sessionId,
+      timestamp,
+      assignedSegmentId: els.addFrameSegment.value,
+    });
+    logActivity(`Added frame candidate at ${timestamp}.`);
+    els.addFrameTimestamp.value = "";
+    state.session = mergeSessionResult(state.session, result);
+    await loadSession(sessionId);
+  } catch (error) {
+    logActivity(`Add candidate unavailable: ${error.message}`, "warn");
+  } finally {
+    setBusy(false);
+  }
+}
+
 async function parseApiResponse(response) {
   const text = await response.text();
   const data = text ? safeJson(text) : {};
@@ -385,6 +478,51 @@ function normalizeCollection(payload, key) {
   if (Array.isArray(payload?.[key])) return payload[key];
   if (Array.isArray(payload?.items)) return payload.items;
   return [];
+}
+
+function normalizeFrameReviewItems(payload) {
+  if (payload?.frameId || payload?.id) {
+    const frameId = payload.frameId || payload.id;
+    return { [frameId]: normalizeFrameReviewItem(payload) };
+  }
+  if (payload?.frame && typeof payload.frame === "object") {
+    const frameId = payload.frame.frameId || payload.frame.id || payload.frame.path;
+    return frameId ? { [frameId]: normalizeFrameReviewItem(payload.frame) } : {};
+  }
+
+  const source =
+    payload?.frameReview?.frames
+    || payload?.frames
+    || payload?.items
+    || payload?.review
+    || payload?.frameReview
+    || payload;
+  if (!source || typeof source !== "object") return {};
+
+  if (Array.isArray(source)) {
+    return source.reduce((items, item) => {
+      const frameId = item.frameId || item.id || item.path;
+      if (frameId) items[frameId] = normalizeFrameReviewItem(item);
+      return items;
+    }, {});
+  }
+
+  return Object.entries(source).reduce((items, [frameId, item]) => {
+    if (item && typeof item === "object") {
+      items[frameId] = normalizeFrameReviewItem({ frameId, ...item });
+    }
+    return items;
+  }, {});
+}
+
+function normalizeFrameReviewItem(item) {
+  const status = item.reviewStatus || item.status || "pending";
+  return {
+    frameId: item.frameId || item.id || "",
+    reviewStatus: ["approved", "rejected", "pending"].includes(status) ? status : "pending",
+    reviewNote: item.reviewNote || item.note || "",
+    assignedSegmentId: item.assignedSegmentId || item.segmentId || "",
+  };
 }
 
 function unwrapSession(payload) {
@@ -540,9 +678,9 @@ function renderTrace() {
 }
 
 function renderFrames() {
-  const frames = getSegments().flatMap((segment) =>
-    (segment.candidateImages || []).map((image) => ({ ...image, segmentId: segment.id }))
-  );
+  const frames = getFrameCandidates();
+  renderAddFrameSegments();
+  updateFrameReviewStatus();
   if (frames.length === 0) {
     els.frameGrid.className = "frame-grid empty-state";
     els.frameGrid.textContent = "Candidate frames will appear after processing.";
@@ -552,17 +690,144 @@ function renderFrames() {
   els.frameGrid.className = "frame-grid";
   els.frameGrid.innerHTML = "";
   frames.slice(0, 48).forEach((frame) => {
+    const review = getFrameReview(frame);
+    const frameId = getFrameId(frame);
     const card = document.createElement("article");
-    card.className = "frame-card";
+    card.className = `frame-card ${review.reviewStatus}`;
+    card.dataset.frameId = frameId;
     const path = frame.path || "";
+    const confidence = frame.confidence ?? frame.score;
     card.innerHTML = `
-      <div class="frame-preview">${path ? `<img src="${escapeAttribute(frameUrl(path))}" alt="Candidate frame ${escapeAttribute(frame.frameId || "")}">` : `<span>No image</span>`}</div>
-      <strong>${escapeHtml(frame.frameId || "frame")}</strong>
+      <div class="frame-preview">${path ? `<img src="${escapeAttribute(frameUrl(path))}" alt="Candidate frame ${escapeAttribute(frame.frameId || frame.id || "")}">` : `<span>No image</span>`}</div>
+      <header class="frame-card-header">
+        <strong>${escapeHtml(frame.frameId || frame.id || frameId || "frame")}</strong>
+        <small>${escapeHtml(review.reviewStatus)} · ${formatPercent(confidence)}</small>
+      </header>
       <span>${escapeHtml(frame.segmentId || "")} at ${escapeHtml(frame.timestamp || "")}</span>
-      <small>${escapeHtml(frame.reviewStatus || "pending")} · ${formatPercent(frame.confidence)}</small>
+      <div class="frame-actions" aria-label="Review ${escapeAttribute(frameId)}">
+        <button class="secondary ${review.reviewStatus === "approved" ? "active" : ""}" type="button" data-frame-action="approved">Approve</button>
+        <button class="secondary ${review.reviewStatus === "rejected" ? "active danger" : "danger"}" type="button" data-frame-action="rejected">Reject</button>
+        <button class="secondary ${review.reviewStatus === "pending" ? "active" : ""}" type="button" data-frame-action="pending">Pending</button>
+      </div>
+      <label class="frame-field">
+        <span>Assigned segment</span>
+        ${renderSegmentSelect(review.assignedSegmentId || frame.segmentId || "", "frame-assign")}
+      </label>
+      <label class="frame-field">
+        <span>Review note</span>
+        <textarea class="frame-note" rows="2" placeholder="Concern, crop issue, or reviewer guidance">${escapeHtml(review.reviewNote || "")}</textarea>
+      </label>
     `;
     els.frameGrid.append(card);
   });
+}
+
+function handleFrameAction(event) {
+  const button = event.target.closest("[data-frame-action]");
+  if (!button) return;
+  const card = button.closest(".frame-card");
+  const frameId = card?.dataset.frameId;
+  if (!frameId) return;
+
+  updateLocalFrameReview(frameId, { reviewStatus: button.dataset.frameAction });
+  renderFrames();
+  saveFrameReview(frameId);
+}
+
+function handleFrameFieldChange(event) {
+  if (!event.target.classList.contains("frame-assign")) return;
+  const frameId = event.target.closest(".frame-card")?.dataset.frameId;
+  if (!frameId) return;
+  updateLocalFrameReview(frameId, { assignedSegmentId: event.target.value });
+  saveFrameReview(frameId);
+}
+
+function handleFrameNoteInput(event) {
+  if (!event.target.classList.contains("frame-note")) return;
+  const frameId = event.target.closest(".frame-card")?.dataset.frameId;
+  if (!frameId) return;
+  updateLocalFrameReview(frameId, { reviewNote: event.target.value });
+  window.clearTimeout(event.target.saveTimer);
+  event.target.saveTimer = window.setTimeout(() => saveFrameReview(frameId), 600);
+}
+
+function updateLocalFrameReview(frameId, patch) {
+  state.frameReview.items[frameId] = {
+    frameId,
+    reviewStatus: "pending",
+    reviewNote: "",
+    assignedSegmentId: "",
+    ...(state.frameReview.items[frameId] || {}),
+    ...patch,
+  };
+}
+
+function getFrameCandidates() {
+  const byId = new Map();
+  getSegments().forEach((segment) => {
+    (segment.candidateImages || []).forEach((image) => {
+      const frame = { ...image, segmentId: image.assignedSegmentId || segment.id };
+      byId.set(getFrameId(frame), frame);
+    });
+  });
+  (state.session?.frameReview?.frames || []).forEach((image) => {
+    const frame = { ...image, segmentId: image.assignedSegmentId || image.segmentId || "" };
+    byId.set(getFrameId(frame), { ...(byId.get(getFrameId(frame)) || {}), ...frame });
+  });
+  return Array.from(byId.values());
+}
+
+function getFrameId(frame) {
+  return frame.frameId || frame.id || frame.path || `${frame.segmentId || "frame"}-${frame.timestamp || "unknown"}`;
+}
+
+function getFrameReview(frame) {
+  const frameId = getFrameId(frame);
+  return {
+    frameId,
+    reviewStatus: frame.reviewStatus || "pending",
+    reviewNote: frame.reviewNote || "",
+    assignedSegmentId: frame.assignedSegmentId || frame.segmentId || "",
+    ...(state.frameReview.items[frameId] || {}),
+  };
+}
+
+function renderAddFrameSegments() {
+  const selected = els.addFrameSegment.value;
+  els.addFrameSegment.innerHTML = `<option value="">No segment</option>`;
+  getSegments().forEach((segment, index) => {
+    const label = `${segment.id || `Segment ${index + 1}`} ${segment.start ? `(${segment.start})` : ""}`;
+    els.addFrameSegment.append(new Option(label, segment.id || `segment-${index + 1}`));
+  });
+  if (selected && Array.from(els.addFrameSegment.options).some((option) => option.value === selected)) {
+    els.addFrameSegment.value = selected;
+  }
+}
+
+function renderSegmentSelect(selectedValue, className) {
+  const options = [`<option value="">No assignment</option>`]
+    .concat(getSegments().map((segment, index) => {
+      const value = segment.id || `segment-${index + 1}`;
+      const label = `${value}${segment.start ? ` (${segment.start})` : ""}`;
+      return `<option value="${escapeAttribute(value)}"${value === selectedValue ? " selected" : ""}>${escapeHtml(label)}</option>`;
+    }))
+    .join("");
+  return `<select class="${escapeAttribute(className)}">${options}</select>`;
+}
+
+function updateFrameReviewStatus(message = "") {
+  const frames = getFrameCandidates();
+  if (frames.length === 0) {
+    els.frameReviewStatus.textContent = "Load a processed session to curate screenshots.";
+    return;
+  }
+
+  const reviewed = frames.map(getFrameReview);
+  const approved = reviewed.filter((frame) => frame.reviewStatus === "approved").length;
+  const rejected = reviewed.filter((frame) => frame.reviewStatus === "rejected").length;
+  const pending = reviewed.length - approved - rejected;
+  const persistence = state.frameReview.endpointAvailable === false ? " Review API unavailable; local changes are temporary." : "";
+  els.frameReviewStatus.textContent = message || `${approved} approved, ${rejected} rejected, ${pending} pending.${persistence}`;
 }
 
 function renderArtifacts() {
@@ -780,6 +1045,7 @@ function setBusy(isBusy) {
     els.buildDocxButton,
     els.qaDocxButton,
     els.reloadSession,
+    els.addFrameButton,
   ].forEach((button) => {
     button.disabled = isBusy;
   });

@@ -265,3 +265,178 @@ def test_health_or_tooling_helper_reports_expected_local_dependencies() -> None:
     if "anthropic" in serialized or "api" in serialized:
         assert "sk-ant-" not in serialized
     assert "ok" in status or "ready" in status or "tools" in status or "dependencies" in status
+
+
+def test_frame_review_actions_persist_and_merge_into_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    processed_root = tmp_path / "samples" / "processed"
+    session_dir = processed_root / "review-session"
+    session_dir.mkdir(parents=True)
+    (session_dir / "manifest.json").write_text(json.dumps({"schemaVersion": 1, "sessionId": "review-session"}), encoding="utf-8")
+    (session_dir / "frame_scores.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "frames": [
+                    {
+                        "id": "frame-0001",
+                        "timestampSeconds": 12.0,
+                        "timestamp": "00:12",
+                        "path": "frames/candidates/frame-0001.png",
+                        "webPath": "frames/candidates/frame-0001.png",
+                        "created": True,
+                        "score": 0.8,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_dir / "procedure_trace.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "segments": [
+                    {
+                        "id": "seg-0001",
+                        "candidateImages": [
+                            {
+                                "frameId": "frame-0001",
+                                "reviewStatus": "pending",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "PROCESSED_ROOT", processed_root)
+    monkeypatch.setattr(module, "GENERATED_ROOT", tmp_path / "artifacts" / "generated")
+
+    result = module.update_frame_review(
+        {
+            "sessionId": "review-session",
+            "frameId": "frame-0001",
+            "action": "approve",
+            "note": "Good application state.",
+            "assignedSegmentId": "seg-0001",
+        }
+    )
+
+    assert result["frameReview"]["summary"]["approved"] == 1
+    review_file = json.loads((session_dir / "frame_review.json").read_text(encoding="utf-8"))
+    assert review_file["frames"]["frame-0001"]["status"] == "approved"
+    assert review_file["frames"]["frame-0001"]["note"] == "Good application state."
+    assert review_file["frames"]["frame-0001"]["assignedSegmentId"] == "seg-0001"
+
+    session = module.read_session(session_dir)
+    image = session["procedureTrace"]["segments"][0]["candidateImages"][0]
+    assert image["reviewStatus"] == "approved"
+    assert image["reviewNote"] == "Good application state."
+    assert session["frameReview"]["frames"][0]["assignedSegmentId"] == "seg-0001"
+
+
+def test_frame_review_accepts_ui_status_and_review_note_aliases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    processed_root = tmp_path / "samples" / "processed"
+    session_dir = processed_root / "review-session"
+    session_dir.mkdir(parents=True)
+    (session_dir / "frame_scores.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "frames": [
+                    {
+                        "id": "frame-0001",
+                        "timestampSeconds": 12.0,
+                        "path": "frames/candidates/frame-0001.png",
+                        "created": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "PROCESSED_ROOT", processed_root)
+
+    module.update_frame_review(
+        {
+            "sessionId": "review-session",
+            "frameId": "frame-0001",
+            "reviewStatus": "approved",
+            "reviewNote": "Use this screenshot in the guide.",
+            "assignedSegmentId": "seg-0001",
+        }
+    )
+
+    review_file = json.loads((session_dir / "frame_review.json").read_text(encoding="utf-8"))
+    assert review_file["frames"]["frame-0001"]["status"] == "approved"
+    assert review_file["frames"]["frame-0001"]["note"] == "Use this screenshot in the guide."
+    assert review_file["frames"]["frame-0001"]["assignedSegmentId"] == "seg-0001"
+
+
+def test_frame_review_rejects_unknown_or_unsafe_frame_ids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    processed_root = tmp_path / "samples" / "processed"
+    session_dir = processed_root / "review-session"
+    session_dir.mkdir(parents=True)
+    (session_dir / "frame_scores.json").write_text(json.dumps({"schemaVersion": 1, "frames": []}), encoding="utf-8")
+    monkeypatch.setattr(module, "PROCESSED_ROOT", processed_root)
+
+    with pytest.raises(module.HttpError):
+        module.update_frame_review({"sessionId": "review-session", "frameId": "../frame", "action": "approve"})
+    with pytest.raises(module.HttpError):
+        module.update_frame_review({"sessionId": "review-session", "frameId": "frame-9999", "action": "approve"})
+
+
+def test_extract_review_frame_adds_candidate_and_review_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    processed_root = tmp_path / "samples" / "processed"
+    session_dir = processed_root / "extract-session"
+    session_dir.mkdir(parents=True)
+    source = tmp_path / "samples" / "raw" / "demo.mov"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"fake video")
+    (session_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "sessionId": "extract-session",
+                "sourceFile": str(source),
+                "processing": {"frameCropFilter": "crop=iw:ih:0:0"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_dir / "frame_scores.json").write_text(json.dumps({"schemaVersion": 1, "frames": []}), encoding="utf-8")
+    monkeypatch.setattr(module, "PROCESSED_ROOT", processed_root)
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/usr/bin/ffmpeg" if name == "ffmpeg" else None)
+
+    def fake_run_command(command: list[str]) -> dict[str, Any]:
+        Path(command[-1]).write_bytes(b"png")
+        return {"returnCode": 0, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(module, "run_command", fake_run_command)
+
+    result = module.extract_review_frame(
+        {
+            "sessionId": "extract-session",
+            "timestamp": "01:02",
+            "frameId": "review-frame-0007",
+            "reviewStatus": "approved",
+            "reviewNote": "Use this dialog.",
+            "segmentId": "seg-0002",
+        }
+    )
+
+    assert result["frame"]["id"] == "review-frame-0007"
+    assert result["frame"]["timestampSeconds"] == 62.0
+    assert (session_dir / "frames" / "candidates" / "review-frame-0007.png").read_bytes() == b"png"
+    frame_scores = json.loads((session_dir / "frame_scores.json").read_text(encoding="utf-8"))
+    assert frame_scores["frames"][0]["source"] == "manual-review-extract"
+    assert frame_scores["frames"][0]["cropFilter"] == "crop=iw:ih:0:0"
+    review = json.loads((session_dir / "frame_review.json").read_text(encoding="utf-8"))
+    assert review["frames"]["review-frame-0007"]["status"] == "approved"
+    assert review["frames"]["review-frame-0007"]["note"] == "Use this dialog."
+    assert review["frames"]["review-frame-0007"]["assignedSegmentId"] == "seg-0002"

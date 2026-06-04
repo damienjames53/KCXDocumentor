@@ -25,6 +25,8 @@ RAW_ROOT = WORKSPACE / "samples" / "raw"
 PROCESSED_ROOT = WORKSPACE / "samples" / "processed"
 GENERATED_ROOT = WORKSPACE / "artifacts" / "generated"
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+FRAME_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,96}$")
+SEGMENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,96}$")
 SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_. -]{0,180}$")
 RECORDING_EXTENSIONS = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".wmv", ".m4v"}
 TRANSCRIPT_EXTENSIONS = {".txt", ".vtt", ".srt", ".json"}
@@ -85,6 +87,11 @@ class KCXDocumentorHandler(BaseHTTPRequestHandler):
                     return
                 self.send_json({"session": read_session(session_dir)})
                 return
+            if parsed.path == "/api/frame-review":
+                params = parse_qs(parsed.query)
+                session_dir = require_session_dir(first_query_value(params, "sessionId"))
+                self.send_json({"frameReview": read_frame_review_view(session_dir)})
+                return
             self.serve_static(parsed.path)
         except HttpError as exc:
             self.send_json({"error": exc.message}, status=exc.status)
@@ -103,6 +110,12 @@ class KCXDocumentorHandler(BaseHTTPRequestHandler):
             body = self.read_json_body()
             if parsed.path == "/api/process":
                 self.send_json(process_recording(body))
+                return
+            if parsed.path == "/api/frame-review":
+                self.send_json(update_frame_review(body))
+                return
+            if parsed.path == "/api/extract-frame":
+                self.send_json(extract_review_frame(body))
                 return
             if parsed.path == "/api/generate-draft":
                 self.send_json(generate_draft(body))
@@ -375,14 +388,15 @@ def qa_docx(body: dict[str, Any]) -> dict[str, Any]:
 def read_session(session_dir: Path) -> dict[str, Any]:
     summary = summarize_session(session_dir)
     files = {}
-    for name in ["manifest.json", "media_metadata.json", "transcript.json", "frame_scores.json", "ocr.json", "procedure_trace.json"]:
+    for name in ["manifest.json", "media_metadata.json", "transcript.json", "frame_scores.json", "ocr.json", "procedure_trace.json", "frame_review.json"]:
         path = session_dir / name
         if path.exists():
             files[name] = read_json_summary(path)
     summary["files"] = files
     trace = read_json_if_exists(session_dir / "procedure_trace.json")
     if trace:
-        summary["procedureTrace"] = trace
+        summary["procedureTrace"] = apply_frame_review_to_trace(trace, read_frame_review(session_dir))
+    summary["frameReview"] = read_frame_review_view(session_dir)
     generated_dir = GENERATED_ROOT / session_dir.name
     summary["generated"] = list_generated_files(generated_dir)
     return summary
@@ -393,6 +407,8 @@ def summarize_session(session_dir: Path) -> dict[str, Any]:
     trace = read_json_if_exists(session_dir / "procedure_trace.json")
     recording = trace.get("recording", {}) if isinstance(trace.get("recording"), dict) else {}
     stat = session_dir.stat()
+    review = read_frame_review(session_dir)
+    review_summary = summarize_frame_review(review, merge_frame_review(session_dir, review))
     return {
         "sessionId": session_dir.name,
         "relativePath": relative_to_workspace(session_dir),
@@ -401,7 +417,258 @@ def summarize_session(session_dir: Path) -> dict[str, Any]:
         "targetApplication": recording.get("targetApplication") or "Unknown Application",
         "durationSeconds": recording.get("durationSeconds"),
         "segmentCount": len(trace.get("segments", [])) if isinstance(trace.get("segments"), list) else None,
+        "frameReview": review_summary,
         "generated": list_generated_files(GENERATED_ROOT / session_dir.name),
+    }
+
+
+def update_frame_review(body: dict[str, Any]) -> dict[str, Any]:
+    session_dir = require_session_dir(body.get("sessionId"))
+    action = normalize_frame_review_action(body)
+    frame_id = require_frame_id(body.get("frameId"))
+    if action not in {"approve", "reject", "pending", "assign", "note"}:
+        raise HttpError(HTTPStatus.BAD_REQUEST, "action must be approve, reject, pending, assign, or note.")
+    require_known_frame(session_dir, frame_id)
+
+    review = read_frame_review(session_dir)
+    entry = ensure_review_entry(review, frame_id)
+    entry["updatedUtc"] = utc_now()
+
+    if action in {"approve", "reject", "pending"}:
+        entry["status"] = "approved" if action == "approve" else "rejected" if action == "reject" else "pending"
+    elif action == "assign":
+        segment_id = optional_segment_id(body.get("segmentId") or body.get("assignedSegmentId"))
+        entry["assignedSegmentId"] = segment_id
+    elif action == "note":
+        entry["note"] = string_value(body.get("note") or body.get("reviewNote"), "")
+
+    if ("note" in body or "reviewNote" in body) and action != "note":
+        entry["note"] = string_value(body.get("note") or body.get("reviewNote"), "")
+    if ("segmentId" in body or "assignedSegmentId" in body) and action != "assign":
+        entry["assignedSegmentId"] = optional_segment_id(body.get("segmentId") or body.get("assignedSegmentId"))
+
+    save_frame_review(session_dir, review)
+    return {"sessionId": session_dir.name, "frameReview": read_frame_review_view(session_dir)}
+
+
+def normalize_frame_review_action(body: dict[str, Any]) -> str:
+    action = string_value(body.get("action"), "").lower()
+    if action:
+        return {"approved": "approve", "rejected": "reject"}.get(action, action)
+    status = string_value(body.get("reviewStatus") or body.get("status"), "").lower()
+    return {"approved": "approve", "rejected": "reject", "pending": "pending"}.get(status, "")
+
+
+def extract_review_frame(body: dict[str, Any]) -> dict[str, Any]:
+    session_dir = require_session_dir(body.get("sessionId"))
+    timestamp_seconds = parse_timestamp_value(body.get("timestampSeconds", body.get("timestamp")))
+    frame_id = optional_frame_id(body.get("frameId")) or next_review_frame_id(session_dir)
+    if (session_dir / "frames" / "candidates" / f"{frame_id}.png").exists():
+        raise HttpError(HTTPStatus.CONFLICT, f"Frame already exists: {frame_id}")
+
+    manifest = read_json_if_exists(session_dir / "manifest.json")
+    source = session_source_path(manifest)
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise HttpError(HTTPStatus.SERVICE_UNAVAILABLE, "ffmpeg is required to extract an additional frame.")
+
+    candidates_dir = session_dir / "frames" / "candidates"
+    candidates_dir.mkdir(parents=True, exist_ok=True)
+    output = safe_join(candidates_dir, f"{frame_id}.png")
+    crop_filter = manifest.get("processing", {}).get("frameCropFilter") if isinstance(manifest.get("processing"), dict) else None
+    command = [ffmpeg, "-y", "-ss", str(timestamp_seconds), "-i", str(source), "-frames:v", "1"]
+    if crop_filter:
+        command.extend(["-vf", str(crop_filter)])
+    command.extend(["-hide_banner", "-loglevel", "error", str(output)])
+    result = run_command(command)
+    if result["returnCode"] != 0 or not output.exists():
+        raise HttpError(HTTPStatus.INTERNAL_SERVER_ERROR, result["stderr"] or f"ffmpeg exited {result['returnCode']}")
+
+    frame = build_review_frame_record(session_dir, frame_id, timestamp_seconds, crop_filter)
+    append_frame_score(session_dir, frame)
+
+    review = read_frame_review(session_dir)
+    entry = ensure_review_entry(review, frame_id)
+    entry["status"] = string_value(body.get("reviewStatus") or body.get("status"), "pending").lower()
+    if entry["status"] not in {"approved", "rejected", "pending"}:
+        entry["status"] = "pending"
+    entry["note"] = string_value(body.get("note") or body.get("reviewNote"), entry.get("note", ""))
+    entry["assignedSegmentId"] = optional_segment_id(body.get("segmentId") or body.get("assignedSegmentId"))
+    entry["addedByReviewer"] = True
+    entry["updatedUtc"] = utc_now()
+    save_frame_review(session_dir, review)
+
+    return {
+        "sessionId": session_dir.name,
+        "frame": {**frame, **entry},
+        "command": command_summary(command),
+        "result": result,
+        "frameReview": read_frame_review_view(session_dir),
+    }
+
+
+def read_frame_review_view(session_dir: Path) -> dict[str, Any]:
+    review = read_frame_review(session_dir)
+    frames = merge_frame_review(session_dir, review)
+    return {
+        **review,
+        "decisions": review.get("frames", {}),
+        "summary": summarize_frame_review(review, frames),
+        "frames": frames,
+    }
+
+
+def read_frame_review(session_dir: Path) -> dict[str, Any]:
+    data = read_json_if_exists(session_dir / "frame_review.json")
+    if not data:
+        return {
+            "schemaVersion": 1,
+            "sessionId": session_dir.name,
+            "updatedUtc": None,
+            "frames": {},
+        }
+    frames = data.get("frames")
+    if not isinstance(frames, dict):
+        data["frames"] = {}
+    data.setdefault("schemaVersion", 1)
+    data.setdefault("sessionId", session_dir.name)
+    data.setdefault("updatedUtc", None)
+    return data
+
+
+def save_frame_review(session_dir: Path, review: dict[str, Any]) -> None:
+    review["schemaVersion"] = 1
+    review["sessionId"] = session_dir.name
+    review["updatedUtc"] = utc_now()
+    write_json_file(session_dir / "frame_review.json", review)
+
+
+def merge_frame_review(session_dir: Path, review: dict[str, Any]) -> list[dict[str, Any]]:
+    frame_scores = read_json_if_exists(session_dir / "frame_scores.json")
+    frames = frame_scores.get("frames", []) if isinstance(frame_scores.get("frames"), list) else []
+    entries = review.get("frames", {}) if isinstance(review.get("frames"), dict) else {}
+    merged = []
+    for frame in frames:
+        if not isinstance(frame, dict) or not frame.get("id"):
+            continue
+        entry = entries.get(frame["id"], {}) if isinstance(entries.get(frame["id"]), dict) else {}
+        merged.append(
+            {
+                **frame,
+                "reviewStatus": entry.get("status", "pending"),
+                "reviewNote": entry.get("note", ""),
+                "assignedSegmentId": entry.get("assignedSegmentId"),
+                "addedByReviewer": bool(entry.get("addedByReviewer", frame.get("source") == "manual-review-extract")),
+                "reviewUpdatedUtc": entry.get("updatedUtc"),
+            }
+        )
+    return merged
+
+
+def summarize_frame_review(review: dict[str, Any], frames: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    entries = review.get("frames", {}) if isinstance(review.get("frames"), dict) else {}
+    frame_list = frames or []
+    if not frame_list and entries:
+        frame_list = [{"reviewStatus": entry.get("status", "pending")} for entry in entries.values() if isinstance(entry, dict)]
+    counts = {"approved": 0, "rejected": 0, "pending": 0}
+    for frame in frame_list:
+        status = frame.get("reviewStatus") or frame.get("status") or "pending"
+        counts[status if status in counts else "pending"] += 1
+    return {
+        "totalFrames": len(frame_list),
+        "approved": counts["approved"],
+        "rejected": counts["rejected"],
+        "pending": counts["pending"],
+        "updatedUtc": review.get("updatedUtc"),
+    }
+
+
+def apply_frame_review_to_trace(trace: dict[str, Any], review: dict[str, Any]) -> dict[str, Any]:
+    entries = review.get("frames", {}) if isinstance(review.get("frames"), dict) else {}
+    if not entries:
+        return trace
+    merged = json.loads(json.dumps(trace))
+    for segment in merged.get("segments", []):
+        if not isinstance(segment, dict):
+            continue
+        for image in segment.get("candidateImages", []):
+            if not isinstance(image, dict):
+                continue
+            entry = entries.get(image.get("frameId"), {})
+            if not isinstance(entry, dict):
+                continue
+            image["reviewStatus"] = entry.get("status", image.get("reviewStatus", "pending"))
+            image["reviewNote"] = entry.get("note", "")
+            image["assignedSegmentId"] = entry.get("assignedSegmentId")
+    return merged
+
+
+def ensure_review_entry(review: dict[str, Any], frame_id: str) -> dict[str, Any]:
+    frames = review.setdefault("frames", {})
+    entry = frames.setdefault(
+        frame_id,
+        {
+            "frameId": frame_id,
+            "status": "pending",
+            "note": "",
+            "assignedSegmentId": None,
+            "addedByReviewer": False,
+            "updatedUtc": None,
+        },
+    )
+    if not isinstance(entry, dict):
+        entry = {"frameId": frame_id, "status": "pending", "note": "", "assignedSegmentId": None}
+        frames[frame_id] = entry
+    entry.setdefault("frameId", frame_id)
+    entry.setdefault("status", "pending")
+    entry.setdefault("note", "")
+    entry.setdefault("assignedSegmentId", None)
+    return entry
+
+
+def require_known_frame(session_dir: Path, frame_id: str) -> dict[str, Any]:
+    frame_scores = read_json_if_exists(session_dir / "frame_scores.json")
+    for frame in frame_scores.get("frames", []) if isinstance(frame_scores.get("frames"), list) else []:
+        if isinstance(frame, dict) and frame.get("id") == frame_id:
+            return frame
+    raise HttpError(HTTPStatus.NOT_FOUND, f"Frame not found in session: {frame_id}")
+
+
+def append_frame_score(session_dir: Path, frame: dict[str, Any]) -> None:
+    path = session_dir / "frame_scores.json"
+    frame_scores = read_json_if_exists(path)
+    frame_scores.setdefault("schemaVersion", 1)
+    frame_scores.setdefault("source", "ffmpeg-interval-extract")
+    frames = frame_scores.setdefault("frames", [])
+    if not isinstance(frames, list):
+        frames = []
+        frame_scores["frames"] = frames
+    frames.append(frame)
+    frames.sort(key=lambda item: item.get("timestampSeconds", 0) if isinstance(item, dict) else 0)
+    write_json_file(path, frame_scores)
+
+
+def build_review_frame_record(session_dir: Path, frame_id: str, timestamp_seconds: float, crop_filter: str | None) -> dict[str, Any]:
+    relative_path = Path("frames") / "candidates" / f"{frame_id}.png"
+    return {
+        "id": frame_id,
+        "timestampSeconds": timestamp_seconds,
+        "timestamp": format_timestamp(timestamp_seconds),
+        "path": str(relative_path),
+        "webPath": str(relative_path).replace("\\", "/"),
+        "created": True,
+        "source": "manual-review-extract",
+        "sourceProfile": "review",
+        "cropFilter": crop_filter,
+        "error": None,
+        "score": 0.9,
+        "qualitySignals": {
+            "createdImage": True,
+            "sampleIntervalSeconds": None,
+            "dedupeState": "not-evaluated-review-add",
+            "blurState": "not-evaluated-review-add",
+        },
+        "selectionReason": "Added by reviewer at a requested timestamp.",
     }
 
 
@@ -542,6 +809,84 @@ def optional_session_id(raw_value: Any) -> str | None:
     if raw_value is None or str(raw_value).strip() == "":
         return None
     return require_session_id(raw_value)
+
+
+def require_frame_id(raw_value: Any) -> str:
+    frame_id = string_value(raw_value, "")
+    if not FRAME_ID_RE.match(frame_id):
+        raise HttpError(HTTPStatus.BAD_REQUEST, "frameId is required and may only contain letters, numbers, dots, underscores, and hyphens.")
+    return frame_id
+
+
+def optional_frame_id(raw_value: Any) -> str | None:
+    if raw_value is None or str(raw_value).strip() == "":
+        return None
+    return require_frame_id(raw_value)
+
+
+def optional_segment_id(raw_value: Any) -> str | None:
+    if raw_value is None or str(raw_value).strip() == "":
+        return None
+    segment_id = string_value(raw_value, "")
+    if not SEGMENT_ID_RE.match(segment_id):
+        raise HttpError(HTTPStatus.BAD_REQUEST, "segmentId may only contain letters, numbers, dots, underscores, and hyphens.")
+    return segment_id
+
+
+def parse_timestamp_value(raw_value: Any) -> float:
+    if isinstance(raw_value, (int, float)):
+        return round_positive(float(raw_value))
+    value = string_value(raw_value, "")
+    if not value:
+        raise HttpError(HTTPStatus.BAD_REQUEST, "timestampSeconds or timestamp is required.")
+    if re.match(r"^\d+(\.\d+)?$", value):
+        return round_positive(float(value))
+    parts = value.split(":")
+    if not 2 <= len(parts) <= 3:
+        raise HttpError(HTTPStatus.BAD_REQUEST, "timestamp must be seconds, mm:ss, or hh:mm:ss.")
+    try:
+        numbers = [float(part) for part in parts]
+    except ValueError as exc:
+        raise HttpError(HTTPStatus.BAD_REQUEST, "timestamp must contain numeric values.") from exc
+    if len(numbers) == 2:
+        minutes, seconds = numbers
+        total = (minutes * 60) + seconds
+    else:
+        hours, minutes, seconds = numbers
+        total = (hours * 3600) + (minutes * 60) + seconds
+    return round_positive(total)
+
+
+def round_positive(value: float) -> float:
+    if value < 0:
+        raise HttpError(HTTPStatus.BAD_REQUEST, "timestamp must be zero or greater.")
+    return round(value, 3)
+
+
+def session_source_path(manifest: dict[str, Any]) -> Path:
+    inputs = manifest.get("inputs", {})
+    input_recording = inputs.get("recording") if isinstance(inputs, dict) else ""
+    raw = string_value(manifest.get("sourceFile") or input_recording, "")
+    if not raw:
+        raise HttpError(HTTPStatus.NOT_FOUND, "Session manifest does not include a source recording path.")
+    source = Path(raw).expanduser().resolve()
+    if not source.is_file():
+        raise HttpError(HTTPStatus.NOT_FOUND, f"Source recording not found: {source}")
+    return source
+
+
+def next_review_frame_id(session_dir: Path) -> str:
+    frame_scores = read_json_if_exists(session_dir / "frame_scores.json")
+    existing = {
+        frame.get("id")
+        for frame in frame_scores.get("frames", [])
+        if isinstance(frame, dict) and isinstance(frame.get("id"), str)
+    }
+    for index in range(1, 10000):
+        frame_id = f"review-frame-{index:04d}"
+        if frame_id not in existing and not (session_dir / "frames" / "candidates" / f"{frame_id}.png").exists():
+            return frame_id
+    raise HttpError(HTTPStatus.CONFLICT, "Could not choose a unique review frame id.")
 
 
 def first_query_value(params: dict[str, list[str]], key: str) -> str:
@@ -725,6 +1070,13 @@ def read_json_if_exists(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def write_json_file(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
 def relative_to_workspace(path: Path) -> str:
     resolved = path.resolve()
     if is_relative_to(resolved, WORKSPACE):
@@ -758,6 +1110,23 @@ def utc_from_timestamp(timestamp: float) -> str:
     from datetime import datetime, timezone
 
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def utc_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def format_timestamp(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    whole_seconds = int(seconds)
+    hours = whole_seconds // 3600
+    minutes = (whole_seconds % 3600) // 60
+    remaining = whole_seconds % 60
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{remaining:02d}"
+    return f"{minutes:02d}:{remaining:02d}"
 
 
 def redact(text: str) -> str:

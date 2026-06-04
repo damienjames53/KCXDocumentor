@@ -26,6 +26,7 @@ def main() -> int:
         return 2
 
     trace = json.loads(trace_path.read_text(encoding="utf-8"))
+    trace = apply_frame_review(trace, trace_path)
     if args.use_anthropic:
         draft = generate_with_anthropic(trace, args)
     else:
@@ -138,10 +139,104 @@ def normalize_instruction(text: str) -> str:
 
 def first_candidate_image(segment: dict[str, Any]) -> dict[str, Any]:
     images = segment.get("candidateImages") or []
-    for image in images:
-        if isinstance(image, dict) and image.get("reviewStatus") != "rejected":
-            return image
+    usable = [image for image in images if isinstance(image, dict) and image.get("reviewStatus") != "rejected"]
+    approved = [image for image in usable if image.get("reviewStatus") == "approved"]
+    if approved:
+        return sorted(approved, key=lambda item: -float(item.get("score") or 0))[0]
+    if usable:
+        return sorted(usable, key=lambda item: -float(item.get("score") or 0))[0]
     return {}
+
+
+def apply_frame_review(trace: dict[str, Any], trace_path: Path) -> dict[str, Any]:
+    session_dir = trace_path.parent
+    review_path = session_dir / "frame_review.json"
+    frame_scores_path = session_dir / "frame_scores.json"
+    if not review_path.exists():
+        return trace
+    try:
+        review = json.loads(review_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return trace
+
+    entries = review.get("frames") if isinstance(review.get("frames"), dict) else {}
+    if not entries:
+        return trace
+
+    frame_lookup = load_frame_score_lookup(frame_scores_path)
+    merged = json.loads(json.dumps(trace))
+    segments = merged.get("segments") if isinstance(merged.get("segments"), list) else []
+    segment_lookup = {segment.get("id"): segment for segment in segments if isinstance(segment, dict)}
+    seen_by_segment = {
+        segment.get("id"): {
+            image.get("frameId")
+            for image in segment.get("candidateImages", [])
+            if isinstance(image, dict) and image.get("frameId")
+        }
+        for segment in segments
+        if isinstance(segment, dict)
+    }
+
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        for image in segment.get("candidateImages", []):
+            if not isinstance(image, dict):
+                continue
+            entry = entries.get(image.get("frameId"))
+            if isinstance(entry, dict):
+                apply_review_entry_to_image(image, entry)
+
+    for frame_id, entry in entries.items():
+        if not isinstance(entry, dict):
+            continue
+        assigned_segment_id = entry.get("assignedSegmentId")
+        if not assigned_segment_id or assigned_segment_id not in segment_lookup:
+            continue
+        if frame_id in seen_by_segment.get(assigned_segment_id, set()):
+            continue
+        frame = frame_lookup.get(frame_id)
+        if not frame:
+            continue
+        image = frame_score_to_candidate_image(frame)
+        apply_review_entry_to_image(image, entry)
+        segment_lookup[assigned_segment_id].setdefault("candidateImages", []).append(image)
+        seen_by_segment.setdefault(assigned_segment_id, set()).add(frame_id)
+
+    return merged
+
+
+def load_frame_score_lookup(path: Path) -> dict[str, dict[str, Any]]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    frames = payload.get("frames") if isinstance(payload.get("frames"), list) else []
+    return {frame.get("id"): frame for frame in frames if isinstance(frame, dict) and frame.get("id")}
+
+
+def frame_score_to_candidate_image(frame: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "frameId": frame.get("id", ""),
+        "path": frame.get("path"),
+        "webPath": frame.get("webPath") or frame.get("path"),
+        "timestamp": frame.get("timestamp", ""),
+        "timestampSeconds": frame.get("timestampSeconds", 0),
+        "score": frame.get("score", 0),
+        "confidence": frame.get("score", 0),
+        "created": frame.get("created", False),
+        "reason": frame.get("selectionReason", "Added during frame review."),
+        "reviewStatus": "pending",
+    }
+
+
+def apply_review_entry_to_image(image: dict[str, Any], entry: dict[str, Any]) -> None:
+    image["reviewStatus"] = entry.get("status", image.get("reviewStatus", "pending"))
+    image["reviewNote"] = entry.get("note", "")
+    image["assignedSegmentId"] = entry.get("assignedSegmentId")
+    image["addedByReviewer"] = bool(entry.get("addedByReviewer", image.get("addedByReviewer", False)))
 
 
 def attach_screenshot_references(draft: dict[str, Any], trace: dict[str, Any]) -> dict[str, Any]:
@@ -223,7 +318,7 @@ def best_candidate_for_step(
         return timeline_candidate_for_step(timeline_candidates, step_index, step_count)
     if not candidates:
         return None
-    return sorted(candidates, key=lambda item: (-float(item.get("score") or 0), item.get("timestampSeconds") or 0))[0]
+    return sorted(candidates, key=screenshot_sort_key)[0]
 
 
 def all_trace_candidates(segment_lookup: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
@@ -236,9 +331,14 @@ def all_trace_candidates(segment_lookup: dict[str, dict[str, Any]]) -> list[dict
             enriched = dict(image)
             enriched["sourceSegmentId"] = segment.get("id", "")
             existing = by_frame.get(frame_id)
-            if existing is None or float(enriched.get("score") or 0) > float(existing.get("score") or 0):
+            if existing is None or screenshot_sort_key(enriched) < screenshot_sort_key(existing):
                 by_frame[frame_id] = enriched
-    return sorted(by_frame.values(), key=lambda item: (item.get("timestampSeconds") or 0, -float(item.get("score") or 0)))
+    return sorted(by_frame.values(), key=lambda item: (item.get("timestampSeconds") or 0, screenshot_sort_key(item)))
+
+
+def screenshot_sort_key(image: dict[str, Any]) -> tuple[int, float, float]:
+    review_rank = 0 if image.get("reviewStatus") == "approved" else 1
+    return (review_rank, -float(image.get("score") or 0), float(image.get("timestampSeconds") or 0))
 
 
 def timeline_candidate_for_step(candidates: list[dict[str, Any]], step_index: int, step_count: int) -> dict[str, Any] | None:

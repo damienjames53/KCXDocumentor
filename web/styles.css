@@ -61,7 +61,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -81,7 +82,8 @@ button:hover {
 
 button:focus-visible,
 input:focus,
-select:focus {
+select:focus,
+textarea:focus {
   outline: none;
   box-shadow: var(--kcx-ui-focus-ring);
 }
@@ -102,8 +104,25 @@ button.icon-button:hover {
   background: var(--panel-strong);
 }
 
+button.secondary.active {
+  border-color: var(--brand);
+  background: var(--kcx-ui-color-primary-soft);
+  color: var(--brand-strong);
+}
+
+button.secondary.danger {
+  border-color: var(--kcx-ui-color-danger);
+  color: var(--bad);
+}
+
+button.secondary.danger:hover,
+button.secondary.danger.active {
+  background: var(--kcx-ui-color-danger-soft);
+}
+
 input,
-select {
+select,
+textarea {
   width: 100%;
   min-height: 36px;
   border: 1px solid var(--line);
@@ -111,6 +130,12 @@ select {
   background: #fff;
   color: var(--text);
   padding: 0 10px;
+}
+
+textarea {
+  min-height: 64px;
+  padding: 8px 10px;
+  resize: vertical;
 }
 
 label span {
@@ -425,8 +450,36 @@ label span {
 
 .frame-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: 10px;
+}
+
+.frame-review-toolbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(460px, 1.4fr);
+  gap: 16px;
+  align-items: end;
+  border: 1px solid var(--line);
+  border-radius: var(--kcx-ui-radius-md);
+  background: var(--panel-strong);
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.frame-review-toolbar strong,
+.frame-review-toolbar span {
+  display: block;
+}
+
+.frame-review-toolbar strong {
+  margin-bottom: 4px;
+}
+
+.add-frame-form {
+  display: grid;
+  grid-template-columns: minmax(130px, 0.7fr) minmax(180px, 1fr) auto;
+  gap: 8px;
+  align-items: end;
 }
 
 .frame-card {
@@ -434,6 +487,16 @@ label span {
   border-radius: 8px;
   padding: 8px;
   background: #fff;
+}
+
+.frame-card.approved {
+  border-color: var(--kcx-ui-color-success);
+  box-shadow: inset 0 3px 0 var(--kcx-ui-color-success);
+}
+
+.frame-card.rejected {
+  border-color: var(--kcx-ui-color-danger);
+  background: var(--kcx-ui-color-danger-soft);
 }
 
 .frame-preview {
@@ -466,6 +529,52 @@ label span {
 .frame-card small {
   color: var(--muted);
   font-size: 12px;
+}
+
+.frame-card-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.frame-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.frame-actions button {
+  min-height: 32px;
+  padding: 0 6px;
+  font-size: 12px;
+}
+
+.frame-field {
+  display: block;
+  margin-top: 8px;
+}
+
+.frame-field span {
+  margin-bottom: 4px;
+}
+
+.add-frame-form input,
+.add-frame-form select,
+.frame-field select,
+.frame-note {
+  width: 100%;
+  min-height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+}
+
+.frame-note {
+  resize: vertical;
+  white-space: normal;
 }
 
 .artifact-list {

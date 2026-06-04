@@ -138,6 +138,102 @@ Runs `scripts/build_guide_docx.py` against the selected generated draft.
 
 The `draft` value must be `deterministic` or `anthropic`.
 
+`GET /api/frame-review?sessionId=<id>`
+
+Loads saved frame curation decisions from `samples/processed/<sessionId>/frame_review.json` and merges them with the session's `frame_scores.json`.
+
+```json
+{
+  "frameReview": {
+    "summary": {
+      "totalFrames": 12,
+      "approved": 4,
+      "rejected": 3,
+      "pending": 5
+    },
+    "frames": [
+      {
+        "id": "frame-0001",
+        "reviewStatus": "approved",
+        "reviewNote": "Best screenshot for the first action.",
+        "assignedSegmentId": "seg-0001"
+      }
+    ],
+    "decisions": {
+      "frame-0001": {
+        "status": "approved",
+        "note": "Best screenshot for the first action.",
+        "assignedSegmentId": "seg-0001"
+      }
+    }
+  }
+}
+```
+
+`GET /api/session?sessionId=<id>` also exposes `frameReview` and merges review status, notes, and segment assignment into each `procedureTrace.segments[].candidateImages[]` item.
+
+`POST /api/frame-review`
+
+Saves one frame curation decision at a time. The `action` value must be `approve`, `reject`, `pending`, `assign`, or `note`.
+
+```json
+{
+  "sessionId": "local-test",
+  "frameId": "frame-0001",
+  "action": "approve",
+  "note": "Use this screenshot in the final guide.",
+  "assignedSegmentId": "seg-0001"
+}
+```
+
+The persisted file uses this shape:
+
+```json
+{
+  "schemaVersion": 1,
+  "sessionId": "local-test",
+  "frames": {
+    "frame-0001": {
+      "frameId": "frame-0001",
+      "status": "approved",
+      "note": "Use this screenshot in the final guide.",
+      "assignedSegmentId": "seg-0001"
+    }
+  }
+}
+```
+
+Rejected frames should be excluded from AI draft generation and DOCX rendering. Approved frames should be preferred when assigning screenshots to generated guide steps.
+
+`POST /api/extract-frame`
+
+Adds a new screenshot candidate by timestamp during review. The endpoint uses the original recording path and frame crop settings from `manifest.json`, writes a PNG under `frames/candidates/`, appends a `manual-review-extract` record to `frame_scores.json`, and creates a matching `frame_review.json` entry.
+
+```json
+{
+  "sessionId": "local-test",
+  "timestamp": "03:25",
+  "frameId": "review-frame-0004",
+  "status": "approved",
+  "note": "Shows the final confirmation dialog.",
+  "assignedSegmentId": "seg-0004"
+}
+```
+
+`timestamp` accepts seconds, `mm:ss`, or `hh:mm:ss`. `frameId`, `status`, `note`, and `assignedSegmentId` are optional. The UI should reload the session after a successful response so the new candidate appears in the Frames tab.
+
+Example update calls:
+
+```bash
+curl -X POST http://127.0.0.1:8765/api/frame-review \
+  -H 'Content-Type: application/json' \
+  -d '{"sessionId":"local-test","frameId":"frame-0001","action":"reject","note":"Teams title card, not application UI."}'
+
+curl -X POST http://127.0.0.1:8765/api/extract-frame \
+  -H 'Content-Type: application/json' \
+  -d '{"sessionId":"local-test","timestamp":"03:25","status":"approved","assignedSegmentId":"seg-0004"}'
+```
+
 ## Quick Smoke Flow
 
 ```bash

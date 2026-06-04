@@ -56,6 +56,7 @@ transcript.json
 frame_scores.json
 ocr.json
 procedure_trace.json
+frame_review.json
 package_readme.md
 audio/narration.wav
 frames/candidates/frame-0001.png
@@ -74,6 +75,18 @@ frames/selected/
 When media tools are missing, candidate images have `created: false` and `path: null`. That is expected. Downstream prototype code should rely on the JSON shape first and treat image files as optional until the frame-selection lane matures.
 
 When `ffmpeg` is available, candidate frames are extracted as browser-friendly `.png` files under `frames/candidates/`. PNG is used because UI screenshots embed reliably in DOCX and preserve application text better than compressed JPEG. Frame records include both `path` and `webPath` values relative to the session directory so the app can serve them through `/api/session?sessionId={id}&asset={path}`.
+
+## Frame Review Overlay
+
+Reviewer frame decisions are stored in `frame_review.json` as a session-local overlay instead of rewriting the original trace artifacts. This keeps the raw extraction reproducible while allowing a reviewer to approve useful screenshots, reject Teams chrome or title cards, add notes, and assign a candidate to a transcript segment.
+
+The local app exposes:
+
+- `GET /api/frame-review?sessionId=<id>` to read merged frame candidates and saved decisions.
+- `POST /api/frame-review` with `action: approve|reject|pending|assign|note` to update one candidate.
+- `POST /api/extract-frame` with a timestamp to add a PNG candidate from the source recording.
+
+Additional frames created through `/api/extract-frame` are appended to `frame_scores.json` with `source: manual-review-extract`, use the session crop filter from `manifest.json`, and receive a matching pending or approved `frame_review.json` entry.
 
 ## Teams Recording Profile
 

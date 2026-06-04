@@ -153,6 +153,25 @@
         </div>
 
         <div id="framesTab" class="tab-panel">
+          <div class="frame-review-toolbar" aria-label="Frame review tools">
+            <div>
+              <strong>Frame Review</strong>
+              <span id="frameReviewStatus" class="muted">Load a processed session to curate screenshots.</span>
+            </div>
+            <form id="addFrameForm" class="add-frame-form">
+              <label>
+                <span>Timestamp</span>
+                <input id="addFrameTimestamp" name="timestamp" autocomplete="off" placeholder="mm:ss or seconds">
+              </label>
+              <label>
+                <span>Assign to</span>
+                <select id="addFrameSegment" name="segmentId">
+                  <option value="">No segment</option>
+                </select>
+              </label>
+              <button id="addFrameButton" class="secondary" type="submit">Add Candidate</button>
+            </form>
+          </div>
           <div id="frameGrid" class="frame-grid empty-state">Candidate frames will appear after processing.</div>
         </div>
 

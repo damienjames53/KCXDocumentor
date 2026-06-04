@@ -680,6 +680,75 @@ def test_generate_draft_distributes_screenshots_when_model_omits_source_segments
     assert [step["screenshotRef"] for step in enriched["steps"]] == ["frame-0001", "frame-0002", "frame-0003"]
 
 
+def test_generate_draft_applies_frame_review_file_to_trace(tmp_path: Path) -> None:
+    module = load_module(GUIDE_DRAFT_SCRIPT, "generate_guide_draft_frame_review")
+    trace_path = tmp_path / "procedure_trace.json"
+    (tmp_path / "frame_scores.json").write_text(
+        json.dumps(
+            {
+                "frames": [
+                    {
+                        "id": "review-frame-0001",
+                        "path": "frames/candidates/review-frame-0001.png",
+                        "webPath": "frames/candidates/review-frame-0001.png",
+                        "timestamp": "00:02:00.000",
+                        "timestampSeconds": 120.0,
+                        "score": 0.9,
+                        "created": True,
+                        "selectionReason": "Added by reviewer.",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "frame_review.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "frames": {
+                    "frame-0001": {"status": "rejected", "note": "Teams title card."},
+                    "review-frame-0001": {
+                        "status": "approved",
+                        "note": "Use this dialog.",
+                        "assignedSegmentId": "seg-0001",
+                        "addedByReviewer": True,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    trace = {
+        "sessionId": "review-demo",
+        "segments": [
+            {
+                "id": "seg-0001",
+                "candidateImages": [
+                    {
+                        "frameId": "frame-0001",
+                        "path": "frames/candidates/frame-0001.png",
+                        "timestampSeconds": 30.0,
+                        "score": 0.7,
+                        "created": True,
+                        "reviewStatus": "pending",
+                    }
+                ],
+            }
+        ],
+    }
+    trace_path.write_text(json.dumps(trace), encoding="utf-8")
+
+    reviewed = module.apply_frame_review(trace, trace_path)
+    images = reviewed["segments"][0]["candidateImages"]
+
+    assert images[0]["reviewStatus"] == "rejected"
+    assert images[0]["reviewNote"] == "Teams title card."
+    assert images[1]["frameId"] == "review-frame-0001"
+    assert images[1]["reviewStatus"] == "approved"
+    assert images[1]["reviewNote"] == "Use this dialog."
+
+
 @pytest.mark.parametrize(
     "relative_path",
     [
