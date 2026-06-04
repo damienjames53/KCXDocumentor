@@ -588,11 +588,14 @@ def build_procedure_trace(
                         "timestamp": frame["timestamp"],
                         "timestampSeconds": frame["timestampSeconds"],
                         "score": frame["score"],
+                        "confidence": frame["score"] if frame["created"] else 0.25,
                         "created": frame["created"],
                         "reason": frame["selectionReason"],
+                        "reviewStatus": "pending",
                     }
                     for frame in candidate_frames
                 ],
+                "confidence": build_segment_confidence(segment, candidate_frames, visible_text),
                 "notes": [
                     "Prototype segment generated before local STT/OCR are wired in."
                     if segment["source"] == "deterministic-placeholder"
@@ -622,6 +625,32 @@ def build_procedure_trace(
                 "Frame scoring is deterministic interval scoring, not CV-based ranking yet.",
             ],
         },
+    }
+
+
+def build_segment_confidence(
+    segment: dict[str, Any],
+    candidate_frames: list[dict[str, Any]],
+    visible_text: list[str],
+) -> dict[str, Any]:
+    transcript_confidence = segment["confidence"] if segment["confidence"] is not None else 0.25
+    frame_confidence = max((frame["score"] if frame["created"] else 0.25 for frame in candidate_frames), default=0.0)
+    ocr_confidence = 0.25 if visible_text else 0.0
+    overall = round((transcript_confidence * 0.5) + (ocr_confidence * 0.25) + (frame_confidence * 0.25), 3)
+    reasons = []
+    if transcript_confidence < 0.7:
+        reasons.append("Transcript confidence is below publication threshold.")
+    if ocr_confidence < 0.7:
+        reasons.append("OCR confidence is below publication threshold or placeholder-only.")
+    if frame_confidence < 0.7:
+        reasons.append("Frame selection confidence is below publication threshold.")
+    return {
+        "transcript": transcript_confidence,
+        "ocr": ocr_confidence,
+        "frameSelection": frame_confidence,
+        "overall": overall,
+        "needsHumanReview": overall < 0.75,
+        "reasons": reasons,
     }
 
 

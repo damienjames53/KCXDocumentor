@@ -20,6 +20,29 @@
       },
       "additionalProperties": true
     },
+    "model": {
+      "type": "object",
+      "properties": {
+        "provider": { "type": "string" },
+        "model": { "type": "string" },
+        "mode": { "type": "string" },
+        "promptVersion": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "reviewFlags": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["severity", "message"],
+        "properties": {
+          "severity": { "type": "string" },
+          "message": { "type": "string" },
+          "segmentId": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
     "sections": {
       "type": "array",
       "items": {
@@ -43,6 +66,8 @@
           "instruction": { "type": "string" },
           "expectedResult": { "type": "string" },
           "uiTerms": { "type": "array", "items": { "type": "string" } },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "needsHumanReview": { "type": "boolean" },
           "screenshot": { "type": "string" },
           "caption": { "type": "string" }
         },
@@ -52,4 +77,3 @@
   },
   "additionalProperties": true
 }
-

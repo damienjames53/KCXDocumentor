@@ -33,6 +33,13 @@ FORBIDDEN_PATTERNS = [
     (re.compile(r"\bDamienDev\b", re.IGNORECASE), "Reference-project path/name leaked."),
 ]
 
+STRICT_FORBIDDEN_PATTERNS = [
+    (re.compile(r"\bPrototype narration segment\b", re.IGNORECASE), "Prototype placeholder narration leaked."),
+    (re.compile(r"\bReplace this with local speech-to-text output\b", re.IGNORECASE), "Local STT placeholder leaked."),
+    (re.compile(r"\bVisible UI text pending local OCR\b", re.IGNORECASE), "Local OCR placeholder leaked."),
+    (re.compile(r"\bplaceholder-only\b", re.IGNORECASE), "Placeholder confidence text leaked."),
+]
+
 
 @dataclass
 class ArtifactResult:
@@ -65,7 +72,7 @@ def text_from_office(path: Path) -> str:
     return normalize(" ".join(text_parts))
 
 
-def check_artifact(path: Path) -> ArtifactResult:
+def check_artifact(path: Path, strict: bool = False) -> ArtifactResult:
     missing: list[str] = []
     forbidden: list[str] = []
     warnings: list[str] = []
@@ -83,7 +90,8 @@ def check_artifact(path: Path) -> ArtifactResult:
         if term.lower() not in lowered:
             missing.append(term)
 
-    for pattern, reason in FORBIDDEN_PATTERNS:
+    patterns = FORBIDDEN_PATTERNS + (STRICT_FORBIDDEN_PATTERNS if strict else [])
+    for pattern, reason in patterns:
         match = pattern.search(text)
         if match:
             forbidden.append(f"{reason} Matched `{match.group(0)[:80]}`.")
@@ -107,9 +115,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Scan generated KCXDocumentor Office artifacts for required guide sections and leakage.")
     parser.add_argument("artifacts", nargs="+", type=Path, help="DOCX/PPTX artifacts to scan.")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    parser.add_argument("--strict", action="store_true", help="Also fail on prototype placeholder text that is acceptable only in local demos.")
     args = parser.parse_args()
 
-    results = [check_artifact(path) for path in args.artifacts]
+    results = [check_artifact(path, strict=args.strict) for path in args.artifacts]
     passed = all(result.passed for result in results)
 
     if args.json:
@@ -132,4 +141,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

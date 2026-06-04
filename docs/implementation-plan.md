@@ -18,7 +18,7 @@ The MVP consumes pre-recorded files rather than recording the screen itself.
 6. OCR candidate frames locally.
 7. Align transcript segments, UI text, and frame timestamps.
 8. Produce `procedure_trace.json`.
-9. Ask the AI model to create a structured guide draft from the trace.
+9. Ask Anthropic Claude Sonnet 4.6 to create a structured guide draft from the trace.
 10. Render the final guide as DOCX using the local keycentrix document assets.
 11. Run deterministic artifact QA before the guide is considered usable.
 
@@ -35,7 +35,7 @@ The MVP consumes pre-recorded files rather than recording the screen itself.
 | Metadata store | SQLite | Simple local session database |
 | Trace format | JSON files plus asset folder | Small, inspectable, easy to replay in tests |
 | DOCX rendering | Open XML SDK long term; local `python-docx` helper for prototype | Deterministic document output with local keycentrix styling |
-| AI provider | Configurable | Keep model/vendor decisions swappable |
+| AI provider | Anthropic Claude Sonnet 4.6 by default | Strong long-context and document-generation fit while keeping provider/model configurable |
 
 ## One-Hour Recording Strategy
 
@@ -48,6 +48,8 @@ One-hour recordings must be treated as large source material, not as prompt cont
 - Group transcript into action windows, usually 20 to 90 seconds.
 - Send the AI only the grouped procedure trace and a limited screenshot candidate list.
 - Use a map-reduce generation pattern: summarize segments first, then compose the full guide.
+- Include transcript, OCR, frame-selection, and overall confidence for every segment.
+- Flag low-confidence stretches for human review instead of letting the AI silently interpolate missing steps.
 
 ## Compact Procedure Trace
 
@@ -66,13 +68,23 @@ One-hour recordings must be treated as large source material, not as prompt cont
       "start": "00:12:08.200",
       "end": "00:13:02.900",
       "speakerText": "Click New Customer, enter the account name, then save.",
+      "confidence": {
+        "transcript": 0.92,
+        "ocr": 0.87,
+        "frameSelection": 0.81,
+        "overall": 0.88,
+        "needsHumanReview": false,
+        "reasons": []
+      },
       "visibleUiText": ["New Customer", "Account Name", "Save"],
       "actionHints": ["click", "form-entry", "save"],
       "candidateImages": [
         {
           "path": "samples/processed/session-001/frames/frame-0012.webp",
           "timestamp": "00:12:35.000",
-          "reason": "clear-form-state"
+          "reason": "clear-form-state",
+          "confidence": 0.81,
+          "reviewStatus": "pending"
         }
       ]
     }
@@ -89,6 +101,12 @@ After the importer works, add native Windows recording.
 - Prefer direct capture to the working format to avoid post-recording transcoding.
 - Store target application title, process name, window bounds, and monitor scale metadata.
 - Add optional cursor/click telemetry if it can be collected without destabilizing capture.
+
+## Human Review Step
+
+Add a lightweight review surface before AI guide generation. The review surface should show transcript segments, confidence scores, review reasons, candidate frames, OCR text, approve/reject/swap controls for still images, and reviewer notes for missing or ambiguous context.
+
+This can start as a local web page that reads `procedure_trace.json` and writes review decisions back into the trace.
 
 ## Milestones
 
@@ -110,20 +128,26 @@ After the importer works, add native Windows recording.
 ### Phase 3 - Guide Generation
 
 - Define guide draft JSON schema.
+- Define and version the Sonnet 4.6 guide prompt.
 - Generate sectioned user-guide content from procedure traces.
 - Render DOCX using local keycentrix assets.
 - Include selected screenshots with captions and step references.
+- Run schema validation and basic forbidden-leak/placeholder QA before accepting generated DOCX output.
 
 ### Phase 4 - QA/Eval Harness
 
 - Add deterministic schema validation.
 - Add forbidden-leak and stale-copy scans.
+- Add no-placeholder-text strict scans for publishable guides.
 - Add golden scenarios for one-hour walkthroughs.
 - Add rendered DOCX visual QA workflow.
+
+## Trace Versioning
+
+Every trace includes `schemaVersion`. Future breaking changes should add a migration script under `scripts/migrations/` rather than forcing existing traces to be regenerated from video.
 
 ### Phase 5 - Native Windows Capture
 
 - Add WinUI target-window selector.
 - Capture selected app window and microphone audio.
 - Produce pipeline-native assets without manual transcoding.
-

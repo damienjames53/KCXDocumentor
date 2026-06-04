@@ -14,6 +14,7 @@ from docx import Document
 ROOT = Path(__file__).resolve().parents[1]
 QA_SCRIPT = ROOT / "scripts" / "qa_document_artifacts.py"
 DOCX_HELPER = ROOT / "tools" / "document_lib" / "keycentrix_docx.py"
+GUIDE_DRAFT_SCRIPT = ROOT / "scripts" / "generate_guide_draft.py"
 
 
 def load_module(path: Path, name: str):
@@ -93,6 +94,36 @@ def test_artifact_qa_rejects_forbidden_reference_terms(tmp_path: Path) -> None:
     assert "Reference-project terminology leaked." in payload["artifacts"][0]["forbidden_matches"][0]
 
 
+def test_artifact_qa_strict_mode_rejects_prototype_placeholders(tmp_path: Path) -> None:
+    docx_path = tmp_path / "placeholder-guide.docx"
+    write_docx(
+        docx_path,
+        [
+            "keycentrix user guide",
+            "Purpose",
+            "Intended Audience",
+            "Workflow Overview",
+            "Step-by-Step Procedures",
+            "Expected Results",
+            "Troubleshooting",
+            "Source Recording",
+            "Prototype narration segment 1",
+        ],
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(QA_SCRIPT), "--json", "--strict", str(docx_path)],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert "Prototype placeholder narration leaked." in payload["artifacts"][0]["forbidden_matches"][0]
+
+
 def test_document_helper_can_build_minimal_docx_shell(tmp_path: Path) -> None:
     helper = load_module(DOCX_HELPER, "keycentrix_docx_test")
     output = tmp_path / "helper-guide.docx"
@@ -136,6 +167,14 @@ def test_compact_procedure_trace_contract_for_one_hour_recordings(tmp_path: Path
                 "visible_ui_text": ["Customer", "Save"],
                 "action_hints": ["open_record", "mouse_click"],
                 "candidate_images": ["frames/frame_000130.webp"],
+                "confidence": {
+                    "transcript": 0.91,
+                    "ocr": 0.84,
+                    "frameSelection": 0.88,
+                    "overall": 0.88,
+                    "needsHumanReview": False,
+                    "reasons": [],
+                },
             }
         ],
     }
@@ -146,8 +185,56 @@ def test_compact_procedure_trace_contract_for_one_hour_recordings(tmp_path: Path
     assert loaded["session"]["duration_sec"] >= 3600
     assert len(json.dumps(loaded)) < 1200
     assert loaded["steps"][0]["speaker_text"]
+    assert loaded["steps"][0]["confidence"]["overall"] >= 0.75
     assert loaded["steps"][0]["visible_ui_text"] == ["Customer", "Save"]
     assert loaded["steps"][0]["candidate_images"][0].endswith(".webp")
+
+
+def test_deterministic_guide_draft_generator_preserves_review_flags(tmp_path: Path) -> None:
+    trace_path = tmp_path / "procedure_trace.json"
+    output_path = tmp_path / "guide_draft.json"
+    trace = {
+        "schemaVersion": 1,
+        "recording": {
+            "sourceFile": "samples/raw/example.mp4",
+            "durationSeconds": 3600,
+            "targetApplication": "Enterprise Rx",
+            "captureMode": "imported-recording",
+        },
+        "segments": [
+            {
+                "id": "seg-0001",
+                "start": "00:00:00.000",
+                "end": "00:01:00.000",
+                "speakerText": "I click Save to finish the record.",
+                "visibleUiText": ["Save"],
+                "actionHints": ["click", "save"],
+                "candidateImages": [{"path": "", "timestamp": "00:00:30.000", "reason": "candidate", "reviewStatus": "pending"}],
+                "confidence": {
+                    "overall": 0.42,
+                    "needsHumanReview": True,
+                    "reasons": ["Transcript confidence is below publication threshold."],
+                },
+            }
+        ],
+    }
+    trace_path.write_text(json.dumps(trace), encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(GUIDE_DRAFT_SCRIPT), str(trace_path), "--output", str(output_path)],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    draft = json.loads(output_path.read_text(encoding="utf-8"))
+    assert draft["model"]["provider"] == "local-deterministic"
+    assert draft["model"]["promptVersion"] == "guide-draft-v1"
+    assert draft["steps"][0]["instruction"].startswith("Click Save")
+    assert draft["steps"][0]["needsHumanReview"] is True
+    assert draft["reviewFlags"][0]["segmentId"] == "seg-0001"
 
 
 @pytest.mark.parametrize(
@@ -155,6 +242,7 @@ def test_compact_procedure_trace_contract_for_one_hour_recordings(tmp_path: Path
     [
         "scripts/process_recording.py",
         "scripts/build_guide_docx.py",
+        "scripts/generate_guide_draft.py",
     ],
 )
 def test_future_prototype_scripts_have_smoke_test_hooks(relative_path: str) -> None:
@@ -172,7 +260,7 @@ def test_future_prototype_scripts_have_smoke_test_hooks(relative_path: str) -> N
 
     assert help_result.returncode == 0
     help_text = help_result.stdout + help_result.stderr
-    assert ("--input" in help_text or "recording" in help_text)
+    assert ("--input" in help_text or "recording" in help_text or "trace" in help_text)
     assert ("--output" in help_text or "--output-root" in help_text)
     if relative_path.endswith("process_recording.py"):
         assert "--no-media-tools" in help_text

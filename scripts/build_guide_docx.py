@@ -140,16 +140,16 @@ def first_existing_image(step: dict[str, Any], input_path: Path) -> tuple[Path |
 def normalize_step(step: dict[str, Any], index: int, input_path: Path) -> GuideStep:
     screenshot, caption = first_existing_image(step, input_path)
     transcript = text_value(step, "speaker_text", "speakerText", "transcript", "narration", "description")
-    action = text_value(step, "action", "instruction", "intent", default=transcript)
-    title = text_value(step, "title", "name", default=f"Step {index}")
+    action = text_value(step, "action", "instruction", "intent", "stepTextPlaceholder", default=transcript)
+    title = text_value(step, "title", "name", "shellId", default=f"Step {index}")
     expected_result = text_value(step, "expected_result", "expectedResult", "result", "outcome")
     return GuideStep(
         title=title,
         action=action,
         expected_result=expected_result,
         notes=as_list(step.get("notes") or step.get("warnings")),
-        ui_text=as_list(pick_value(step, "visible_ui_text", "visibleUiText", "ui_text", "uiText", "ocr_text", "ocrText")),
-        action_hints=as_list(pick_value(step, "action_hints", "actionHints", "events")),
+        ui_text=as_list(pick_value(step, "visible_ui_text", "visibleUiText", "ui_text", "uiText", "ocr_text", "ocrText", "confirmedUiLabels")),
+        action_hints=as_list(pick_value(step, "action_hints", "actionHints", "events", "actionHint")),
         transcript=transcript,
         start=text_value(step, "start", "start_time"),
         end=text_value(step, "end", "end_time"),
@@ -159,6 +159,11 @@ def normalize_step(step: dict[str, Any], index: int, input_path: Path) -> GuideS
 
 
 def normalize_input(data: dict[str, Any], input_path: Path) -> GuideDraft:
+    if isinstance(data.get("guideDraft"), dict):
+        wrapped_model = data.get("model") if isinstance(data.get("model"), dict) else {}
+        data = data["guideDraft"]
+        data.setdefault("model", {}).update(wrapped_model)
+
     document = data.get("document") if isinstance(data.get("document"), dict) else {}
     session = data.get("session") if isinstance(data.get("session"), dict) else {}
     recording = data.get("recording") if isinstance(data.get("recording"), dict) else {}
@@ -170,6 +175,10 @@ def normalize_input(data: dict[str, Any], input_path: Path) -> GuideDraft:
     if not isinstance(raw_steps, list):
         raw_steps = data.get("segments")
     if not isinstance(raw_steps, list):
+        raw_steps = data.get("confirmedSteps")
+    if not isinstance(raw_steps, list) or not raw_steps:
+        raw_steps = data.get("pendingStepShells")
+    if not isinstance(raw_steps, list):
         raise ValueError("Input JSON must contain a steps, procedure_steps, or segments array.")
 
     title = text_value(
@@ -178,7 +187,11 @@ def normalize_input(data: dict[str, Any], input_path: Path) -> GuideDraft:
         default=text_value(
             data,
             "title",
-            default=f"{text_value(recording, 'targetApplication', default=text_value(session, 'app_name', default='Application'))} User Guide",
+            default=text_value(
+                data,
+                "title",
+                default=f"{text_value(recording, 'targetApplication', default=text_value(session, 'app_name', default='Application'))} User Guide",
+            ),
         ),
     )
     version = text_value(document, "version", default=text_value(data, "version", default="Draft v0.1"))
@@ -192,11 +205,7 @@ def normalize_input(data: dict[str, Any], input_path: Path) -> GuideDraft:
     summary = text_value(
         document,
         "summary",
-        default=text_value(
-            data,
-            "summary",
-            default="This guide was generated from a local procedure trace without external AI processing.",
-        ),
+        default=text_value(data, "summary", "purpose", default="This guide was generated from a local procedure trace."),
     )
 
     source_metadata = {
@@ -224,13 +233,30 @@ def normalize_input(data: dict[str, Any], input_path: Path) -> GuideDraft:
         summary=summary,
         audience=as_list(data.get("audience") or document.get("audience") or ["Application users"]),
         prerequisites=as_list(data.get("prerequisites") or document.get("prerequisites")),
-        workflow_overview=as_list(data.get("workflow_overview") or data.get("overview") or document.get("workflow_overview")),
+        workflow_overview=as_list(
+            data.get("workflow_overview")
+            or data.get("overview")
+            or document.get("workflow_overview")
+            or section_body(data, "Workflow Overview")
+        ),
         expected_results=as_list(data.get("expected_results") or document.get("expected_results")),
         troubleshooting=as_list(data.get("troubleshooting") or document.get("troubleshooting")),
         review_notes=as_list(data.get("review_notes") or document.get("review_notes")),
         source_metadata=source_metadata,
         steps=[normalize_step(step, idx + 1, input_path) for idx, step in enumerate(raw_steps) if isinstance(step, dict)],
     )
+
+
+def section_body(data: dict[str, Any], title: str) -> list[str]:
+    sections = data.get("sections")
+    if not isinstance(sections, list):
+        return []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        if str(section.get("title", "")).strip().lower() == title.lower():
+            return as_list(section.get("body")) + as_list(section.get("bullets"))
+    return []
 
 
 def add_labeled_paragraph(doc: Document, label: str, value: str) -> None:
