@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "eval:validate": "node tests/evals/validate-fixtures.mjs",
-    "eval:offline": "node tests/evals/run-offline-fixture-evals.mjs"
+    "eval:offline": "node tests/evals/run-offline-fixture-evals.mjs",
+    "test:python": "python -m pytest",
+    "prototype:process": "python scripts/process_recording.py samples/raw/example.mp4 --no-media-tools --target-application \"Enterprise Rx\" --session-id prototype-demo --force",
+    "prototype:docx": "python scripts/build_guide_docx.py samples/processed/prototype-demo/procedure_trace.json --output artifacts/generated/prototype-demo/user_guide.docx",
+    "prototype:qa": "python scripts/qa_document_artifacts.py artifacts/generated/prototype-demo/user_guide.docx"
   }
 }
-

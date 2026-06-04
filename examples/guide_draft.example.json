@@ -1,0 +1,76 @@
+{
+  "document": {
+    "title": "KCXDocumentor Prototype User Guide",
+    "version": "Draft v0.1",
+    "status": "Prototype",
+    "owner": "KCXDocumentor",
+    "effective_date": "2026-06-04",
+    "summary": "This sample guide demonstrates local DOCX rendering from a compact guide draft without external AI processing."
+  },
+  "audience": [
+    "Application users",
+    "Implementation consultants validating generated guide structure"
+  ],
+  "prerequisites": [
+    "Access to the target Windows application",
+    "A completed recording-derived guide draft or procedure trace"
+  ],
+  "workflow_overview": [
+    "Review the source recording summary.",
+    "Follow the extracted procedure steps in order.",
+    "Confirm expected results and review notes before publishing."
+  ],
+  "expected_results": [
+    "The user can complete the documented workflow without watching the original recording.",
+    "Reviewers can trace each procedure step back to timing and visible UI context."
+  ],
+  "troubleshooting": [
+    "If a screenshot is missing, rerun frame selection or attach a reviewed still image to the step.",
+    "If a UI label is incorrect, correct the guide draft before publishing."
+  ],
+  "review_notes": [
+    "Prototype output should be reviewed before customer distribution."
+  ],
+  "session": {
+    "app_name": "Example Windows Application",
+    "duration_sec": 3600,
+    "recorded_at": "2026-06-04T10:00:00-05:00"
+  },
+  "steps": [
+    {
+      "title": "Open the customer workflow",
+      "action": "Select the customer workflow from the application navigation.",
+      "expected_result": "The customer workspace opens and displays the available actions.",
+      "visible_ui_text": [
+        "Customers",
+        "Search",
+        "New Customer"
+      ],
+      "action_hints": [
+        "navigation",
+        "mouse_click"
+      ],
+      "start": "00:03:12.400",
+      "end": "00:03:48.900"
+    },
+    {
+      "title": "Create the customer record",
+      "action": "Click New Customer, enter the required account details, and save the record.",
+      "expected_result": "The application saves the customer record and displays a confirmation or updated customer detail screen.",
+      "visible_ui_text": [
+        "New Customer",
+        "Account Name",
+        "Save"
+      ],
+      "action_hints": [
+        "mouse_click",
+        "form_entry"
+      ],
+      "notes": [
+        "Use approved sample data when producing customer-facing documentation."
+      ],
+      "start": "00:03:49.000",
+      "end": "00:05:10.000"
+    }
+  ]
+}

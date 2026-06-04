@@ -1,6 +1,7 @@
 .DS_Store
 __pycache__/
 *.py[cod]
+.pytest_cache/
 .venv/
 venv/
 node_modules/
@@ -23,4 +24,3 @@ artifacts/qa/*
 # Model files are installed locally and should not be committed.
 models/*
 !models/.gitkeep
-

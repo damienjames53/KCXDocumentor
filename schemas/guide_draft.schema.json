@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://keycentrix.local/kcxdocumentor/guide_draft.schema.json",
+  "title": "KCXDocumentor Guide Draft",
+  "type": "object",
+  "required": ["schemaVersion", "title", "audience", "purpose", "sourceRecording", "sections", "steps"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "title": { "type": "string" },
+    "audience": { "type": "string" },
+    "purpose": { "type": "string" },
+    "status": { "type": "string" },
+    "owner": { "type": "string" },
+    "sourceRecording": {
+      "type": "object",
+      "required": ["sourceFile", "durationSeconds"],
+      "properties": {
+        "sourceFile": { "type": "string" },
+        "durationSeconds": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "sections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["title", "body"],
+        "properties": {
+          "title": { "type": "string" },
+          "body": { "type": "array", "items": { "type": "string" } },
+          "bullets": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": true
+      }
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["title", "instruction", "expectedResult"],
+        "properties": {
+          "title": { "type": "string" },
+          "instruction": { "type": "string" },
+          "expectedResult": { "type": "string" },
+          "uiTerms": { "type": "array", "items": { "type": "string" } },
+          "screenshot": { "type": "string" },
+          "caption": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}
+

@@ -15,6 +15,7 @@ The product direction is token-aware by design: local processing converts long r
 ## Repo Layout
 
 - `docs/` - implementation plan, architecture, document rules, testing, and model optimization notes.
+- `schemas/` - JSON contracts for procedure traces and guide drafts.
 - `assets/branding/` - copied keycentrix branding assets from DamienDev for isolated local builds.
 - `tools/document_lib/` - copied and localized document helper code.
 - `scripts/` - QA and eval helpers for generated artifacts.
@@ -33,3 +34,25 @@ The implementation plan was informed by read-only inspection of:
 
 Do not modify those projects from this repository.
 
+## Prototype Flow
+
+The first prototype is designed to work even before FFmpeg, Whisper, OCR, or an AI provider is wired in.
+
+Install the Python prototype dependencies:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e ".[test]"
+```
+
+```bash
+.venv/bin/python scripts/process_recording.py samples/raw/example.mp4 --no-media-tools --target-application "Enterprise Rx" --session-id prototype-demo --force
+.venv/bin/python scripts/build_guide_docx.py samples/processed/prototype-demo/procedure_trace.json --output artifacts/generated/prototype-demo/user_guide.docx
+.venv/bin/python scripts/qa_document_artifacts.py artifacts/generated/prototype-demo/user_guide.docx
+npm run eval:validate
+npm run eval:offline
+```
+
+The same flow is also available through `npm run prototype:process`, `npm run prototype:docx`, and `npm run prototype:qa` when `python` points at an environment with the Python dependencies installed.
+
+See `docs/prototype-runbook.md` for the current run criteria.
