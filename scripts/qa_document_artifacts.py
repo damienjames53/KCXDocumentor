@@ -48,28 +48,60 @@ class ArtifactResult:
     missing_required_terms: list[str]
     forbidden_matches: list[str]
     warnings: list[str]
+    reviewer_comment_count: int = 0
+    body_clean: bool = True
 
 
 def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def text_from_office(path: Path) -> str:
+def extract_text_from_xml(xml_bytes: bytes) -> str:
     text_parts: list[str] = []
+    try:
+        root = ElementTree.fromstring(xml_bytes)
+    except ElementTree.ParseError:
+        return ""
+    for node in root.iter():
+        if node.text and node.tag.endswith("}t"):
+            text_parts.append(node.text)
+    return normalize(" ".join(text_parts))
+
+
+def office_text_parts(path: Path) -> tuple[str, str]:
+    body_parts: list[str] = []
+    comment_parts: list[str] = []
     with ZipFile(path) as package:
         for name in package.namelist():
             if not name.endswith(".xml"):
                 continue
+            if name.startswith("word/comments") or name.startswith("word/people"):
+                comment_text = extract_text_from_xml(package.read(name))
+                if comment_text:
+                    comment_parts.append(comment_text)
+                continue
             if not (name.startswith("word/") or name.startswith("ppt/slides/")):
                 continue
-            try:
-                root = ElementTree.fromstring(package.read(name))
-            except ElementTree.ParseError:
-                continue
-            for node in root.iter():
-                if node.text and node.tag.endswith("}t"):
-                    text_parts.append(node.text)
-    return normalize(" ".join(text_parts))
+            body_text = extract_text_from_xml(package.read(name))
+            if body_text:
+                body_parts.append(body_text)
+    return normalize(" ".join(body_parts)), normalize(" ".join(comment_parts))
+
+
+def reviewer_comment_count(path: Path) -> int:
+    with ZipFile(path) as package:
+        if "word/comments.xml" not in package.namelist():
+            return 0
+        try:
+            root = ElementTree.fromstring(package.read("word/comments.xml"))
+        except ElementTree.ParseError:
+            return 0
+    return sum(1 for node in root.iter() if node.tag.endswith("}comment"))
+
+
+def text_from_office(path: Path) -> str:
+    body_text, comment_text = office_text_parts(path)
+    return normalize(" ".join(part for part in [body_text, comment_text] if part))
 
 
 def check_artifact(path: Path, strict: bool = False) -> ArtifactResult:
@@ -81,26 +113,40 @@ def check_artifact(path: Path, strict: bool = False) -> ArtifactResult:
         return ArtifactResult(str(path), False, ["file exists"], [], [])
 
     try:
-        text = text_from_office(path)
+        body_text, comment_text = office_text_parts(path)
+        comment_count = reviewer_comment_count(path)
     except BadZipFile:
         return ArtifactResult(str(path), False, [], [f"{path.name} is not a readable Office Open XML file"], [])
 
-    lowered = text.lower()
+    lowered = body_text.lower()
     for term in REQUIRED_TERMS:
         if term.lower() not in lowered:
             missing.append(term)
 
-    patterns = FORBIDDEN_PATTERNS + (STRICT_FORBIDDEN_PATTERNS if strict else [])
-    for pattern, reason in patterns:
-        match = pattern.search(text)
+    body_forbidden: list[str] = []
+    all_text = normalize(" ".join(part for part in [body_text, comment_text] if part))
+    for pattern, reason in FORBIDDEN_PATTERNS:
+        match = pattern.search(all_text)
         if match:
             forbidden.append(f"{reason} Matched `{match.group(0)[:80]}`.")
+        body_match = pattern.search(body_text)
+        if body_match:
+            body_forbidden.append(f"{reason} Matched `{body_match.group(0)[:80]}`.")
+
+    if strict:
+        for pattern, reason in STRICT_FORBIDDEN_PATTERNS:
+            match = pattern.search(body_text)
+            if match:
+                forbidden.append(f"{reason} Matched `{match.group(0)[:80]}`.")
+                body_forbidden.append(f"{reason} Matched `{match.group(0)[:80]}`.")
 
     if "keycentrix" not in lowered:
         warnings.append("Document does not include visible keycentrix company text.")
 
     if "screenshot" not in lowered and "screen" not in lowered:
         warnings.append("Document does not appear to reference screenshots or screen states.")
+    if comment_text:
+        warnings.append("Document includes reviewer comments that should be resolved before customer release.")
 
     return ArtifactResult(
         path=str(path),
@@ -108,6 +154,8 @@ def check_artifact(path: Path, strict: bool = False) -> ArtifactResult:
         missing_required_terms=missing,
         forbidden_matches=forbidden,
         warnings=warnings,
+        reviewer_comment_count=comment_count,
+        body_clean=not body_forbidden,
     )
 
 

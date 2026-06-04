@@ -16,6 +16,7 @@ QA_SCRIPT = ROOT / "scripts" / "qa_document_artifacts.py"
 DOCX_HELPER = ROOT / "tools" / "document_lib" / "keycentrix_docx.py"
 GUIDE_DRAFT_SCRIPT = ROOT / "scripts" / "generate_guide_draft.py"
 PROCESS_RECORDING_SCRIPT = ROOT / "scripts" / "process_recording.py"
+BUILD_GUIDE_DOCX_SCRIPT = ROOT / "scripts" / "build_guide_docx.py"
 
 
 def load_module(path: Path, name: str):
@@ -194,7 +195,7 @@ def test_build_guide_docx_accepts_section_based_anthropic_shape(tmp_path: Path) 
     )
 
     result = subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "build_guide_docx.py"), str(input_path), "--output", str(output_path)],
+        [sys.executable, str(BUILD_GUIDE_DOCX_SCRIPT), str(input_path), "--output", str(output_path)],
         cwd=ROOT,
         check=False,
         text=True,
@@ -207,7 +208,160 @@ def test_build_guide_docx_accepts_section_based_anthropic_shape(tmp_path: Path) 
     text = "\n".join(paragraph.text for paragraph in doc.paragraphs)
     assert "Overview of Communication Methods" in text
     assert "Note that SendKey supports fax" in text
-    assert "Screenshots require human approval" in text
+    assert "Screenshots require human approval" not in text
+    with ZipFile(output_path) as package:
+        comments_xml = package.read("word/comments.xml").decode("utf-8")
+    assert "Screenshots require human approval" in comments_xml
+
+
+def test_build_guide_docx_places_reviewer_concerns_in_comments_not_body(tmp_path: Path) -> None:
+    input_path = tmp_path / "review-draft.json"
+    output_path = tmp_path / "review-guide.docx"
+    input_path.write_text(
+        json.dumps(
+            {
+                "title": "Clean Review Guide",
+                "summary": "Use this guide to complete the sample workflow.",
+                "audience": ["Application users"],
+                "workflow_overview": ["Complete the workflow in the order shown."],
+                "expected_results": ["The workflow is completed successfully."],
+                "steps": [
+                    {
+                        "title": "Save the record",
+                        "instruction": "Select Save to finish updating the record.",
+                        "expectedResult": "The record is saved.",
+                        "reviewNotes": ["Confirm the screenshot does not include Teams controls."],
+                        "visibleUiText": ["Save", "Teams"],
+                        "confidence": {
+                            "needsHumanReview": True,
+                            "reasons": ["Transcript confidence is below publication threshold."],
+                        },
+                    }
+                ],
+                "openReviewItems": [
+                    {
+                        "id": "review-001",
+                        "severity": "warning",
+                        "description": "Screenshot selection requires approval.",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(BUILD_GUIDE_DOCX_SCRIPT), str(input_path), "--output", str(output_path)],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    doc = Document(output_path)
+    body_text = "\n".join(paragraph.text for paragraph in doc.paragraphs)
+    assert "Select Save to finish updating the record." in body_text
+    assert "Confirm the screenshot does not include Teams controls." not in body_text
+    assert "Transcript confidence is below publication threshold." not in body_text
+    assert "Source UI evidence" not in body_text
+    with ZipFile(output_path) as package:
+        comments_xml = package.read("word/comments.xml").decode("utf-8")
+    assert "Confirm the screenshot does not include Teams controls." in comments_xml
+    assert "Transcript confidence is below publication threshold." in comments_xml
+
+
+def test_artifact_qa_reports_reviewer_comments_and_body_cleanliness(tmp_path: Path) -> None:
+    input_path = tmp_path / "commented-draft.json"
+    output_path = tmp_path / "commented-guide.docx"
+    input_path.write_text(
+        json.dumps(
+            {
+                "title": "Commented Guide",
+                "summary": "Use this guide to complete the workflow.",
+                "audience": ["Application users"],
+                "workflow_overview": ["Complete the documented task."],
+                "expected_results": ["The task is complete."],
+                "steps": [
+                    {
+                        "title": "Review and save",
+                        "instruction": "Review the record and select Save.",
+                        "expectedResult": "The record is saved.",
+                        "reviewNotes": ["Visible UI text pending local OCR should be resolved before release."],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    build = subprocess.run(
+        [sys.executable, str(BUILD_GUIDE_DOCX_SCRIPT), str(input_path), "--output", str(output_path)],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert build.returncode == 0, build.stdout + build.stderr
+
+    result = subprocess.run(
+        [sys.executable, str(QA_SCRIPT), "--json", "--strict", str(output_path)],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    artifact = payload["artifacts"][0]
+    assert artifact["body_clean"] is True
+    assert artifact["reviewer_comment_count"] >= 1
+    assert any("reviewer comments" in warning.lower() for warning in artifact["warnings"])
+
+
+def test_artifact_qa_rejects_prompt_or_reasoning_leaks_in_comments(tmp_path: Path) -> None:
+    input_path = tmp_path / "leaky-comment-draft.json"
+    output_path = tmp_path / "leaky-comment-guide.docx"
+    input_path.write_text(
+        json.dumps(
+            {
+                "title": "Leaky Comment Guide",
+                "summary": "Use this guide to complete the workflow.",
+                "audience": ["Application users"],
+                "workflow_overview": ["Complete the documented task."],
+                "expected_results": ["The task is complete."],
+                "steps": [
+                    {
+                        "title": "Review and save",
+                        "instruction": "Review the record and select Save.",
+                        "expectedResult": "The record is saved.",
+                        "reviewNotes": ["The system prompt should decide this action."],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    build = subprocess.run(
+        [sys.executable, str(BUILD_GUIDE_DOCX_SCRIPT), str(input_path), "--output", str(output_path)],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert build.returncode == 0, build.stdout + build.stderr
+
+    result = subprocess.run(
+        [sys.executable, str(QA_SCRIPT), "--json", str(output_path)],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert "Internal prompt terminology leaked." in payload["artifacts"][0]["forbidden_matches"][0]
 
 
 def test_compact_procedure_trace_contract_for_one_hour_recordings(tmp_path: Path) -> None:

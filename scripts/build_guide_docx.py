@@ -46,6 +46,7 @@ class GuideStep:
     end: str = ""
     screenshot: Path | None = None
     screenshot_caption: str = ""
+    reviewer_comments: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -156,18 +157,39 @@ def normalize_step(step: dict[str, Any], index: int, input_path: Path) -> GuideS
     action = text_value(step, "action", "instruction", "intent", "stepTextPlaceholder", "body", default=transcript)
     title = text_value(step, "title", "name", "shellId", default=f"Step {index}")
     expected_result = text_value(step, "expected_result", "expectedResult", "result", "outcome")
+    notes = as_list(step.get("notes") or step.get("warnings") or step.get("reviewNotes"))
+    ui_text = as_list(pick_value(step, "visible_ui_text", "visibleUiText", "ui_text", "uiText", "ocr_text", "ocrText", "confirmedUiLabels"))
+    action_hints = as_list(pick_value(step, "action_hints", "actionHints", "events", "actionHint", "actionHints"))
+    reviewer_comments = list(notes)
+    if step.get("needsHumanReview") is True:
+        reviewer_comments.append("This step was flagged for human review by the draft generator.")
+    confidence = step.get("confidence")
+    if isinstance(confidence, dict):
+        reasons = as_list(confidence.get("reasons"))
+        if confidence.get("needsHumanReview") is True:
+            reviewer_comments.append("Source confidence requires human review.")
+        reviewer_comments.extend(reasons)
+    if step.get("reviewStatus") == "rejected":
+        reviewer_comments.append("The selected screenshot was rejected during frame review and should be replaced.")
+    if ui_text:
+        reviewer_comments.append(f"Source UI evidence: {'; '.join(ui_text)}")
+    if action_hints:
+        reviewer_comments.append(f"Source action hints: {'; '.join(action_hints)}")
+    if step.get("screenshotReviewStatus") not in (None, "", "approved"):
+        reviewer_comments.append(f"Screenshot review status: {step.get('screenshotReviewStatus')}")
     return GuideStep(
         title=title,
         action=action,
         expected_result=expected_result,
-        notes=as_list(step.get("notes") or step.get("warnings") or step.get("reviewNotes")),
-        ui_text=as_list(pick_value(step, "visible_ui_text", "visibleUiText", "ui_text", "uiText", "ocr_text", "ocrText", "confirmedUiLabels")),
-        action_hints=as_list(pick_value(step, "action_hints", "actionHints", "events", "actionHint", "actionHints")),
+        notes=notes,
+        ui_text=ui_text,
+        action_hints=action_hints,
         transcript=transcript,
         start=text_value(step, "start", "start_time"),
         end=text_value(step, "end", "end_time"),
         screenshot=screenshot,
         screenshot_caption=caption,
+        reviewer_comments=reviewer_comments,
     )
 
 
@@ -336,18 +358,41 @@ def add_required_bullet_section(doc: Document, title: str, items: list[str], fal
     add_bullets(doc, items or [fallback])
 
 
-def render_step(doc: Document, step: GuideStep, index: int) -> None:
-    doc.add_heading(f"{index}. {step.title}", level=2)
+def add_reviewer_comment(doc: Document, paragraph: Any, comments: list[str]) -> bool:
+    clean_comments = [comment.strip() for comment in comments if comment and comment.strip()]
+    if not clean_comments or not paragraph.runs or not hasattr(doc, "add_comment"):
+        return False
+    try:
+        doc.add_comment(
+            paragraph.runs,
+            text="\n".join(clean_comments),
+            author="KCXDocumentor Reviewer",
+            initials="KCX",
+        )
+    except Exception:
+        return False
+    return True
+
+
+def add_fallback_reviewer_section(doc: Document, comments: list[str]) -> None:
+    if not comments:
+        return
+    doc.add_heading("Reviewer Comments", level=1)
+    add_bullets(doc, comments)
+
+
+def render_step(doc: Document, step: GuideStep, index: int) -> list[str]:
+    heading = doc.add_heading(f"{index}. {step.title}", level=2)
+    step_comments = list(dict.fromkeys(step.reviewer_comments))
+    if step.start or step.end:
+        step_comments.append(f"Source timing: {' - '.join(part for part in [step.start, step.end] if part)}")
+    if not add_reviewer_comment(doc, heading, step_comments):
+        fallback_comments = [f"Step {index}: {comment}" for comment in step_comments]
+    else:
+        fallback_comments = []
+
     add_labeled_paragraph(doc, "Action", step.action)
     add_labeled_paragraph(doc, "Expected result", step.expected_result)
-    if step.start or step.end:
-        add_labeled_paragraph(doc, "Source timing", " - ".join(part for part in [step.start, step.end] if part))
-    if step.ui_text:
-        add_labeled_paragraph(doc, "Visible UI text", "; ".join(step.ui_text))
-    if step.action_hints:
-        add_labeled_paragraph(doc, "Action hints", "; ".join(step.action_hints))
-    if step.notes:
-        add_labeled_paragraph(doc, "Notes", "; ".join(step.notes))
 
     if step.screenshot:
         picture_p = doc.add_paragraph()
@@ -363,6 +408,10 @@ def render_step(doc: Document, step: GuideStep, index: int) -> None:
                 run.italic = True
                 run.font.name = FONT
                 run.font.size = Pt(8.8)
+    else:
+        fallback_comments.append(f"Step {index}: No screenshot was available for this procedure step.")
+
+    return fallback_comments
 
 
 def render_docx(draft: GuideDraft, output_path: Path) -> None:
@@ -381,7 +430,10 @@ def render_docx(draft: GuideDraft, output_path: Path) -> None:
     )
 
     doc.add_heading("Purpose", level=1)
-    doc.add_paragraph(draft.summary)
+    purpose_p = doc.add_paragraph(draft.summary)
+    fallback_comments: list[str] = []
+    if draft.review_notes and not add_reviewer_comment(doc, purpose_p, draft.review_notes):
+        fallback_comments.extend(draft.review_notes)
 
     add_optional_bullet_section(doc, "Intended Audience", draft.audience)
     add_required_bullet_section(
@@ -399,7 +451,7 @@ def render_docx(draft: GuideDraft, output_path: Path) -> None:
 
     doc.add_heading("Step-by-Step Procedures", level=1)
     for index, step in enumerate(draft.steps, start=1):
-        render_step(doc, step, index)
+        fallback_comments.extend(render_step(doc, step, index))
 
     add_required_bullet_section(
         doc,
@@ -411,9 +463,9 @@ def render_docx(draft: GuideDraft, output_path: Path) -> None:
         doc,
         "Troubleshooting Notes",
         draft.troubleshooting,
-        "If a step or screenshot is unclear, return to the source trace and replace placeholder content before publishing.",
+        "If the workflow does not match the current application behavior, verify the step with an application reviewer.",
     )
-    add_optional_bullet_section(doc, "Review Notes", draft.review_notes)
+    add_fallback_reviewer_section(doc, fallback_comments)
 
     doc.add_heading("Appendix: Source Recording Metadata", level=1)
     add_metadata_table(doc, list(draft.source_metadata.items()))

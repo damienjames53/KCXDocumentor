@@ -75,7 +75,19 @@ Image paths may be absolute or relative to the input JSON, repository root, or c
 ## Rendering Rules
 
 - Use `keycentrix` lowercase in generated fixed text.
-- Render cover, document control metadata, audience, prerequisites, workflow overview, procedures, expected results, troubleshooting notes, review notes, and source metadata.
+- Render cover, document control metadata, audience, prerequisites, workflow overview, procedures, expected results, troubleshooting notes, and source metadata.
 - Include screenshots only when a referenced image exists locally.
-- Preserve source timing, visible UI text, and action hints so later QA can compare the DOCX against the procedure trace.
+- Keep the visible body suitable for a customer-facing guide: no prompt text, raw JSON, AI reasoning language, prototype placeholders, or internal reference-project names.
+- Put reviewer concerns in Word comments instead of visible tags or body sections. This includes source timing, low confidence warnings, screenshot approval concerns, visible UI evidence, and action hints.
+- If Word comments are unavailable, render a clearly named `Reviewer Comments` fallback section so QA can distinguish reviewer-only content from the guide body.
 - Keep generation deterministic so offline fixture tests can compare structure without AI variability.
+
+## Reviewer Comments
+
+Reviewer comments are intended for technical writers and application reviewers. They should explain concrete publication concerns, not expose model thought process. Good comments include:
+
+- `Transcript confidence is below publication threshold.`
+- `Confirm the screenshot does not include Teams controls.`
+- `Source UI evidence: Save; Submit; Confirm`
+
+Do not put these concerns in the guide body. The guide body should remain direct, concise, and instructional.

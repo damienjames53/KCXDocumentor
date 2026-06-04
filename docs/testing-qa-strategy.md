@@ -34,6 +34,8 @@ Add tests for:
 - DOCX export success
 - generated DOCX text extraction
 - forbidden internal text and secret-name scans
+- reviewer comments are present for low-confidence publication concerns
+- reviewer concerns do not appear in the visible guide body
 - screenshot file existence and dimensions
 
 ## AI Regression Evals
@@ -57,14 +59,17 @@ Each scenario should include:
 The QA script should scan DOCX artifacts for:
 
 - missing required guide sections
-- internal prompt leakage
+- internal prompt leakage in the body or reviewer comments
 - environment metadata leakage
 - secret names
 - raw JSON payload leakage
 - stale product or project terminology
 - missing source/recording metadata
 - missing screenshot references when steps require visuals
-- prototype placeholder narration or OCR text when `--strict` is used
+- prototype placeholder narration or OCR text in the visible body when `--strict` is used
+- reviewer comment presence so unresolved concerns can be tracked before customer release
+
+The visible DOCX body should read like a finished user guide. Low-confidence transcript notes, screenshot approval concerns, OCR evidence, and source timing belong in Word comments. If comments are unavailable in the runtime, they may appear only in a clearly named reviewer-only fallback section.
 
 ## Visual QA
 
