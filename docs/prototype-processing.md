@@ -11,7 +11,7 @@ The local app server exposes the same lane for initial video testing:
 - `GET /api/transcripts` lists `.txt`, `.vtt`, `.srt`, and `.json` transcript sidecars in `samples/raw/`.
 - `POST /api/import-recording` imports a multipart `file` upload into `samples/raw/`.
 - `POST /api/import-transcript` imports a multipart `file` upload into `samples/raw/`.
-- `POST /api/process` accepts `recording`, optional `transcript`, `targetApplication`, `sessionId`, `force`, and `noMediaTools`.
+- `POST /api/process` accepts `recording`, optional `transcript`, `targetApplication`, `sourceProfile`, `sessionId`, `force`, and `noMediaTools`.
 
 Uploads are filename-validated and restricted to plain file names under `samples/raw/`. For very large one-hour recordings, directly copying the file into `samples/raw/` is still the most reliable local workflow until the prototype server grows a streaming upload worker.
 
@@ -58,7 +58,7 @@ ocr.json
 procedure_trace.json
 package_readme.md
 audio/narration.wav
-frames/candidates/frame-0001.jpg
+frames/candidates/frame-0001.png
 frames/selected/
 ```
 
@@ -73,7 +73,25 @@ frames/selected/
 
 When media tools are missing, candidate images have `created: false` and `path: null`. That is expected. Downstream prototype code should rely on the JSON shape first and treat image files as optional until the frame-selection lane matures.
 
-When `ffmpeg` is available, candidate frames are extracted as browser-friendly `.jpg` files under `frames/candidates/`. Frame records include both `path` and `webPath` values relative to the session directory so the app can serve them through `/api/session?sessionId={id}&asset={path}`.
+When `ffmpeg` is available, candidate frames are extracted as browser-friendly `.png` files under `frames/candidates/`. PNG is used because UI screenshots embed reliably in DOCX and preserve application text better than compressed JPEG. Frame records include both `path` and `webPath` values relative to the session directory so the app can serve them through `/api/session?sessionId={id}&asset={path}`.
+
+## Teams Recording Profile
+
+Teams recordings often include title cards, participant rails, letterboxing, and meeting overlays that are not useful in a training document. Use the Teams profile for those sources:
+
+```bash
+python3 scripts/process_recording.py samples/raw/teams-recording.mp4 \
+  --target-application "Blink Rx" \
+  --source-profile teams-recording
+```
+
+The Teams profile currently:
+
+- skips the first 60 seconds for frame selection
+- crops candidate screenshots with `crop=iw*0.872:ih*0.874:0:ih*0.063`
+- records the crop and source profile in `manifest.json` and `frame_scores.json`
+
+Use `--skip-start-seconds` or `--frame-crop-filter` when a Teams recording needs different cleanup.
 
 ## Local Whisper Transcription
 

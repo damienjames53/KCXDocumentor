@@ -22,6 +22,7 @@ const els = {
   transcriptSelect: document.querySelector("#transcriptSelect"),
   transcriptPathInput: document.querySelector("#transcriptPathInput"),
   targetApplication: document.querySelector("#targetApplication"),
+  sourceProfile: document.querySelector("#sourceProfile"),
   sessionIdInput: document.querySelector("#sessionIdInput"),
   forceProcess: document.querySelector("#forceProcess"),
   noMediaTools: document.querySelector("#noMediaTools"),
@@ -194,6 +195,7 @@ async function processRecording(event) {
   const payload = {
     recording,
     targetApplication: els.targetApplication.value.trim() || "Unknown Application",
+    sourceProfile: els.sourceProfile.value || "standard",
     sessionId: els.sessionIdInput.value.trim() || undefined,
     transcript: getSelectedTranscript() || undefined,
     force: els.forceProcess.checked,
@@ -711,6 +713,9 @@ function syncSessionIdPlaceholder() {
   const recording = els.recordingSelect.value;
   const base = recording.split("/").pop()?.replace(/\.[^.]+$/, "") || "recording";
   els.sessionIdInput.placeholder = `${slugify(base)}-test`;
+  if (/teams|meeting recording/i.test(recording)) {
+    els.sourceProfile.value = "teams-recording";
+  }
 }
 
 function frameUrl(path) {

@@ -8,6 +8,7 @@ Use this checklist for the first real recording before attempting a full one-hou
 - Prefer MP4 or MKV with clear microphone narration.
 - Place the video in `samples/raw/`.
 - If available, place a plain-text transcript sidecar next to it or anywhere local. If not, the prototype will use local Whisper transcription.
+- If the source is a Microsoft Teams recording, use the Teams recording source profile to crop meeting chrome from candidate screenshots.
 - Use a target application name that should appear in the generated guide, such as `Enterprise Rx`.
 
 ## 2. Confirm Local Tools
@@ -50,6 +51,16 @@ Without a transcript sidecar:
   --force
 ```
 
+For a Teams recording:
+
+```bash
+.venv/bin/python scripts/process_recording.py samples/raw/SHORT_SAMPLE.mp4 \
+  --target-application "Enterprise Rx" \
+  --source-profile teams-recording \
+  --session-id first-video-short \
+  --force
+```
+
 Expected outputs in `samples/processed/first-video-short/`:
 
 - `manifest.json`
@@ -69,6 +80,7 @@ Check:
 - `procedure_trace.json` has reasonable segment timestamps.
 - Segments include confidence fields and review reasons.
 - Candidate frames are bounded and do not explode token or storage cost.
+- Candidate frames show the application, not Teams title cards, participant rails, or meeting overlays.
 - Placeholder transcript or placeholder OCR keeps `needsHumanReview` true.
 
 ## 5. Generate a Draft

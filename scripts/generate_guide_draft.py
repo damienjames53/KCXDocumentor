@@ -30,6 +30,7 @@ def main() -> int:
         draft = generate_with_anthropic(trace, args)
     else:
         draft = generate_deterministic_draft(trace, args)
+    draft = attach_screenshot_references(draft, trace)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(draft, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -120,6 +121,7 @@ def draft_step_from_segment(segment: dict[str, Any], index: int) -> dict[str, An
         "confidence": confidence.get("overall", 0.0),
         "needsHumanReview": confidence.get("needsHumanReview", True),
         "screenshot": image.get("path") or "",
+        "selectedScreenshot": build_screenshot_reference(image, segment),
         "caption": f"Candidate screenshot at {image.get('timestamp', segment.get('start', 'unknown time'))}",
         "sourceSegmentId": segment.get("id"),
     }
@@ -140,6 +142,141 @@ def first_candidate_image(segment: dict[str, Any]) -> dict[str, Any]:
         if isinstance(image, dict) and image.get("reviewStatus") != "rejected":
             return image
     return {}
+
+
+def attach_screenshot_references(draft: dict[str, Any], trace: dict[str, Any]) -> dict[str, Any]:
+    segment_lookup = {segment.get("id"): segment for segment in trace.get("segments", []) if isinstance(segment, dict)}
+    session_id = trace.get("sessionId", "")
+    processed_root = WORKSPACE / "samples" / "processed" / session_id if session_id else None
+
+    timeline_candidates = all_trace_candidates(segment_lookup)
+
+    def enrich_step(step: dict[str, Any], index: int, total: int) -> None:
+        if step_has_screenshot(step):
+            return
+        candidate = best_candidate_for_step(step, segment_lookup, timeline_candidates, index, total)
+        if not candidate:
+            step["needsHumanReview"] = True
+            notes = step.setdefault("reviewNotes", [])
+            if isinstance(notes, list):
+                notes.append("No candidate screenshot could be assigned from the trace.")
+            return
+        screenshot = build_screenshot_reference(candidate, {"id": candidate.get("sourceSegmentId", "")}, processed_root)
+        step["selectedScreenshot"] = screenshot
+        step["screenshot"] = screenshot.get("path", "")
+        step["screenshotRef"] = screenshot.get("frameId", "")
+        step.setdefault("caption", f"Candidate screenshot at {screenshot.get('timestamp', 'unknown time')}")
+
+    steps = iter_draft_steps(draft)
+    for index, step in enumerate(steps):
+        enrich_step(step, index, len(steps))
+    return draft
+
+
+def iter_draft_steps(draft: dict[str, Any]) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = []
+    raw_steps = draft.get("steps")
+    if isinstance(raw_steps, list):
+        steps.extend(step for step in raw_steps if isinstance(step, dict))
+    sections = draft.get("sections")
+    if isinstance(sections, list):
+        for section in sections:
+            if isinstance(section, dict) and isinstance(section.get("steps"), list):
+                steps.extend(step for step in section["steps"] if isinstance(step, dict))
+    return steps
+
+
+def step_has_screenshot(step: dict[str, Any]) -> bool:
+    for key in ("screenshot", "selectedScreenshot", "selected_screenshot"):
+        value = step.get(key)
+        if isinstance(value, dict) and value.get("path"):
+            return True
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
+
+
+def best_candidate_for_step(
+    step: dict[str, Any],
+    segment_lookup: dict[str, dict[str, Any]],
+    timeline_candidates: list[dict[str, Any]],
+    step_index: int,
+    step_count: int,
+) -> dict[str, Any] | None:
+    segment_ids = as_string_list(
+        step.get("sourceSegmentId")
+        or step.get("sourceSegments")
+        or step.get("segments")
+        or step.get("segmentId")
+    )
+    candidates = []
+    for segment_id in segment_ids:
+        segment = segment_lookup.get(segment_id)
+        if not segment:
+            continue
+        for image in segment.get("candidateImages", []):
+            if isinstance(image, dict) and image.get("created") and image.get("path") and image.get("reviewStatus") != "rejected":
+                enriched = dict(image)
+                enriched["sourceSegmentId"] = segment_id
+                candidates.append(enriched)
+    if not candidates:
+        return timeline_candidate_for_step(timeline_candidates, step_index, step_count)
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: (-float(item.get("score") or 0), item.get("timestampSeconds") or 0))[0]
+
+
+def all_trace_candidates(segment_lookup: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    by_frame: dict[str, dict[str, Any]] = {}
+    for segment in segment_lookup.values():
+        for image in segment.get("candidateImages", []):
+            if not isinstance(image, dict) or not image.get("created") or not image.get("path") or image.get("reviewStatus") == "rejected":
+                continue
+            frame_id = str(image.get("frameId") or image.get("path"))
+            enriched = dict(image)
+            enriched["sourceSegmentId"] = segment.get("id", "")
+            existing = by_frame.get(frame_id)
+            if existing is None or float(enriched.get("score") or 0) > float(existing.get("score") or 0):
+                by_frame[frame_id] = enriched
+    return sorted(by_frame.values(), key=lambda item: (item.get("timestampSeconds") or 0, -float(item.get("score") or 0)))
+
+
+def timeline_candidate_for_step(candidates: list[dict[str, Any]], step_index: int, step_count: int) -> dict[str, Any] | None:
+    if not candidates:
+        return None
+    if step_count <= 1:
+        return candidates[0]
+    position = step_index / max(1, step_count - 1)
+    candidate_index = round(position * (len(candidates) - 1))
+    return candidates[max(0, min(len(candidates) - 1, candidate_index))]
+
+
+def build_screenshot_reference(
+    image: dict[str, Any],
+    segment: dict[str, Any],
+    processed_root: Path | None = None,
+) -> dict[str, Any]:
+    path = image.get("path") or ""
+    resolved_path = str((processed_root / path).resolve()) if processed_root and path else path
+    return {
+        "frameId": image.get("frameId", ""),
+        "path": resolved_path,
+        "relativePath": path,
+        "timestamp": image.get("timestamp", ""),
+        "timestampSeconds": image.get("timestampSeconds", 0),
+        "score": image.get("score", 0),
+        "sourceSegmentId": segment.get("id", ""),
+        "reviewStatus": image.get("reviewStatus", "pending"),
+    }
+
+
+def as_string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if value is None:
+        return []
+    text = str(value).strip()
+    return [text] if text else []
 
 
 def build_review_flags(segments: list[dict[str, Any]]) -> list[dict[str, str]]:

@@ -38,6 +38,7 @@ ACTION_WORDS = {
     "confirm": "confirm",
     "search": "search",
 }
+SOURCE_PROFILES = {"standard", "teams-recording"}
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,11 @@ def main() -> int:
             "whisper": tooling.whisper,
             "mediaToolsDisabled": args.no_media_tools,
             "localSttDisabled": args.no_local_stt,
+        },
+        "processing": {
+            "sourceProfile": args.source_profile,
+            "skipStartSeconds": effective_skip_start_seconds(args),
+            "frameCropFilter": build_frame_crop_filter(args),
         },
         "outputs": {
             "mediaMetadata": "media_metadata.json",
@@ -196,6 +202,23 @@ def parse_args() -> argparse.Namespace:
         "--no-media-tools",
         action="store_true",
         help="Skip ffprobe/ffmpeg calls and emit metadata/frame placeholders only.",
+    )
+    parser.add_argument(
+        "--source-profile",
+        choices=sorted(SOURCE_PROFILES),
+        default="standard",
+        help="Input recording profile. Use teams-recording to crop Teams chrome from candidate frames.",
+    )
+    parser.add_argument(
+        "--skip-start-seconds",
+        type=float,
+        default=None,
+        help="Ignore early source seconds when selecting frame candidates. Defaults to 60 for teams-recording, otherwise 0.",
+    )
+    parser.add_argument(
+        "--frame-crop-filter",
+        default=None,
+        help="Optional FFmpeg crop filter for candidate frames. Overrides the source-profile crop.",
     )
     parser.add_argument(
         "--ffmpeg-timeout-seconds",
@@ -728,12 +751,15 @@ def maybe_extract_frames(
     metadata: dict[str, Any],
     args: argparse.Namespace,
 ) -> list[dict[str, Any]]:
+    skip_start_seconds = effective_skip_start_seconds(args)
     planned = planned_frame_timestamps(
         duration=metadata["durationSeconds"],
         interval=args.sample_interval_seconds,
         max_frames=args.max_frames,
+        start_seconds=skip_start_seconds,
     )
     candidates_dir = session_dir / "frames" / "candidates"
+    crop_filter = build_frame_crop_filter(args)
     if not tooling.ffmpeg:
         return [
             {
@@ -744,6 +770,8 @@ def maybe_extract_frames(
                 "webPath": None,
                 "created": False,
                 "source": "deterministic-placeholder",
+                "sourceProfile": args.source_profile,
+                "cropFilter": crop_filter,
                 "error": "ffmpeg not available",
             }
             for index, timestamp in enumerate(planned)
@@ -752,7 +780,7 @@ def maybe_extract_frames(
     extracted: list[dict[str, Any]] = []
     for index, timestamp in enumerate(planned):
         frame_id = f"frame-{index + 1:04d}"
-        path = candidates_dir / f"{frame_id}.jpg"
+        path = candidates_dir / f"{frame_id}.png"
         cmd = [
             tooling.ffmpeg,
             "-y",
@@ -762,13 +790,17 @@ def maybe_extract_frames(
             str(source),
             "-frames:v",
             "1",
-            "-q:v",
-            "3",
+        ]
+        if crop_filter:
+            cmd.extend(["-vf", crop_filter])
+        cmd.extend(
+            [
             "-hide_banner",
             "-loglevel",
             "error",
             str(path),
-        ]
+            ]
+        )
         command = run_command(cmd, timeout_seconds=args.ffmpeg_timeout_seconds)
         created = command["returnCode"] == 0 and path.exists()
         extracted.append(
@@ -780,18 +812,36 @@ def maybe_extract_frames(
                 "webPath": str(path.relative_to(session_dir)).replace("\\", "/") if created else None,
                 "created": created,
                 "source": "ffmpeg" if created else "deterministic-placeholder",
+                "sourceProfile": args.source_profile,
+                "cropFilter": crop_filter,
                 "error": None if created else command["stderr"] or f"ffmpeg exited {command['returnCode']}",
             }
         )
     return extracted
 
 
-def planned_frame_timestamps(duration: float, interval: float, max_frames: int) -> list[float]:
+def effective_skip_start_seconds(args: argparse.Namespace) -> float:
+    if args.skip_start_seconds is not None:
+        return round_positive(args.skip_start_seconds)
+    if args.source_profile == "teams-recording":
+        return 60.0
+    return 0.0
+
+
+def build_frame_crop_filter(args: argparse.Namespace) -> str | None:
+    if args.frame_crop_filter:
+        return args.frame_crop_filter
+    if args.source_profile == "teams-recording":
+        return "crop=iw*0.872:ih*0.874:0:ih*0.063"
+    return None
+
+
+def planned_frame_timestamps(duration: float, interval: float, max_frames: int, start_seconds: float = 0.0) -> list[float]:
     interval = max(1.0, interval)
     max_frames = max(1, max_frames)
     duration = max(1.0, duration)
     timestamps = []
-    current = min(2.0, duration / 2)
+    current = min(max(2.0, start_seconds), duration / 2 if start_seconds >= duration else duration)
     while current < duration and len(timestamps) < max_frames:
         timestamps.append(round_positive(current))
         current += interval

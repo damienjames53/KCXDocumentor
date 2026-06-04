@@ -262,6 +262,7 @@ def process_recording(body: dict[str, Any]) -> dict[str, Any]:
     target_application = string_value(body.get("targetApplication"), "Unknown Application")
     session_id = optional_session_id(body.get("sessionId"))
     no_media_tools = bool(body.get("noMediaTools", False))
+    source_profile = string_value(body.get("sourceProfile"), "standard")
     force = bool(body.get("force", False))
 
     command = build_process_command(
@@ -270,6 +271,7 @@ def process_recording(body: dict[str, Any]) -> dict[str, Any]:
         target_application=target_application,
         transcript=transcript,
         no_media_tools=no_media_tools,
+        source_profile=source_profile,
         force=force,
     )
 
@@ -470,6 +472,7 @@ def build_process_command(
     target_application: str = "Unknown Application",
     transcript: Path | None = None,
     no_media_tools: bool = False,
+    source_profile: str = "standard",
     force: bool = False,
 ) -> list[str]:
     command = [
@@ -483,6 +486,8 @@ def build_process_command(
     ]
     if transcript:
         command.extend(["--transcript", str(transcript)])
+    if source_profile and source_profile != "standard":
+        command.extend(["--source-profile", source_profile])
     if session_id:
         command.extend(["--session-id", session_id])
     if no_media_tools:

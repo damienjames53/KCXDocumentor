@@ -110,7 +110,7 @@ def resolve_asset_path(raw_path: Any, input_path: Path) -> Path | None:
     if raw_path is None:
         return None
     if isinstance(raw_path, dict):
-        raw_path = raw_path.get("path") or raw_path.get("file") or raw_path.get("filename")
+        raw_path = raw_path.get("path") or raw_path.get("relativePath") or raw_path.get("file") or raw_path.get("filename")
     if not str(raw_path).strip():
         return None
 
@@ -128,7 +128,7 @@ def resolve_asset_path(raw_path: Any, input_path: Path) -> Path | None:
 
 def first_existing_image(step: dict[str, Any], input_path: Path) -> tuple[Path | None, str]:
     image_values: list[Any] = []
-    for key in ("screenshot", "image", "selected_image", "selected_screenshot", "selectedImage", "selectedScreenshot"):
+    for key in ("screenshot", "screenshotRef", "image", "selected_image", "selected_screenshot", "selectedImage", "selectedScreenshot"):
         if step.get(key):
             image_values.append(step[key])
     candidate_images = pick_value(step, "candidate_images", "candidateImages")

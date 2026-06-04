@@ -228,6 +228,26 @@ def test_transcript_command_builder_includes_sidecar_when_helper_supports_it(tmp
     assert str(transcript) in command_text
 
 
+def test_processing_command_builder_can_enable_teams_recording_profile(tmp_path: Path) -> None:
+    module = load_app_server()
+    builder = find_callable(module, "build_process_command", "build_processing_command")
+    recording = tmp_path / "samples" / "raw" / "teams.mp4"
+    recording.parent.mkdir(parents=True)
+    recording.write_bytes(b"placeholder")
+
+    command = invoke_with_supported_kwargs(
+        builder,
+        recording,
+        repo_root=ROOT,
+        output_root=tmp_path / "samples" / "processed",
+        target_application="SendKey",
+        source_profile="teams-recording",
+    )
+
+    assert "--source-profile" in command
+    assert "teams-recording" in command
+
+
 def test_health_or_tooling_helper_reports_expected_local_dependencies() -> None:
     module = load_app_server()
     checker = find_optional_callable(module, "get_health", "health_check", "check_tooling", "get_tooling_status")

@@ -102,12 +102,15 @@ Runs `scripts/process_recording.py`.
   "recording": "example.mp4",
   "transcript": "example.vtt",
   "targetApplication": "Enterprise Rx",
+  "sourceProfile": "standard",
   "sessionId": "local-test",
   "noMediaTools": false
 }
 ```
 
 The `transcript` property is optional. When provided, it is passed through to `scripts/process_recording.py --transcript` and takes precedence over local STT. When omitted, the processing script extracts narration audio with FFmpeg and runs local `whisper-cli` using the repo-local model at `models/whisper/ggml-base.en.bin`.
+
+Use `"sourceProfile": "teams-recording"` for Microsoft Teams recordings that include title cards, participant rails, or meeting chrome. The local UI also auto-selects this profile when a recording filename looks like a Teams meeting recording.
 
 `POST /api/generate-draft`
 

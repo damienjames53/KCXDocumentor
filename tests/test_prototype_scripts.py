@@ -418,6 +418,114 @@ def test_build_transcript_prefers_local_whisper_when_no_sidecar() -> None:
     assert "Open the order screen" in transcript["segments"][0]["text"]
 
 
+def test_teams_recording_profile_skips_intro_and_crops_frames() -> None:
+    module = load_module(PROCESS_RECORDING_SCRIPT, "process_recording_teams_profile")
+    args = type("Args", (), {"source_profile": "teams-recording", "skip_start_seconds": None, "frame_crop_filter": None})()
+
+    assert module.effective_skip_start_seconds(args) == 60.0
+    assert module.build_frame_crop_filter(args).startswith("crop=")
+    assert module.planned_frame_timestamps(300.0, 30.0, 3, start_seconds=60.0) == [60.0, 90.0, 120.0]
+
+
+def test_generate_draft_attaches_screenshot_references_to_model_steps() -> None:
+    module = load_module(GUIDE_DRAFT_SCRIPT, "generate_guide_draft_screenshots")
+    draft = {
+        "sections": [
+            {
+                "title": "Approve Fax",
+                "steps": [
+                    {
+                        "instruction": "Select the fax row.",
+                        "sourceSegments": ["seg-0002"],
+                    }
+                ],
+            }
+        ]
+    }
+    trace = {
+        "sessionId": "demo-session",
+        "segments": [
+            {
+                "id": "seg-0002",
+                "candidateImages": [
+                    {
+                        "frameId": "frame-0002",
+                        "path": "frames/candidates/frame-0002.jpg",
+                        "timestamp": "00:01:00.000",
+                        "timestampSeconds": 60.0,
+                        "score": 0.81,
+                        "created": True,
+                        "reviewStatus": "pending",
+                    }
+                ],
+            }
+        ],
+    }
+
+    enriched = module.attach_screenshot_references(draft, trace)
+    step = enriched["sections"][0]["steps"][0]
+
+    assert step["screenshotRef"] == "frame-0002"
+    assert step["selectedScreenshot"]["frameId"] == "frame-0002"
+    assert step["selectedScreenshot"]["path"].endswith("samples/processed/demo-session/frames/candidates/frame-0002.jpg")
+
+
+def test_generate_draft_distributes_screenshots_when_model_omits_source_segments() -> None:
+    module = load_module(GUIDE_DRAFT_SCRIPT, "generate_guide_draft_screenshot_distribution")
+    draft = {
+        "steps": [
+            {"instruction": "First action."},
+            {"instruction": "Second action."},
+            {"instruction": "Third action."},
+        ]
+    }
+    trace = {
+        "sessionId": "demo-session",
+        "segments": [
+            {
+                "id": "seg-0001",
+                "candidateImages": [
+                    {
+                        "frameId": "frame-0001",
+                        "path": "frames/candidates/frame-0001.jpg",
+                        "timestampSeconds": 60.0,
+                        "score": 0.7,
+                        "created": True,
+                    }
+                ],
+            },
+            {
+                "id": "seg-0002",
+                "candidateImages": [
+                    {
+                        "frameId": "frame-0002",
+                        "path": "frames/candidates/frame-0002.jpg",
+                        "timestampSeconds": 120.0,
+                        "score": 0.7,
+                        "created": True,
+                    }
+                ],
+            },
+            {
+                "id": "seg-0003",
+                "candidateImages": [
+                    {
+                        "frameId": "frame-0003",
+                        "path": "frames/candidates/frame-0003.jpg",
+                        "timestampSeconds": 180.0,
+                        "score": 0.7,
+                        "created": True,
+                    }
+                ],
+            },
+        ],
+    }
+
+    enriched = module.attach_screenshot_references(draft, trace)
+
+    assert [step["screenshotRef"] for step in enriched["steps"]] == ["frame-0001", "frame-0002", "frame-0003"]
+
+
 @pytest.mark.parametrize(
     "relative_path",
     [
