@@ -11,6 +11,7 @@
     "prototype:draft": "python scripts/generate_guide_draft.py samples/processed/prototype-demo/procedure_trace.json --output artifacts/generated/prototype-demo/guide_draft.json",
     "prototype:draft:anthropic": "python scripts/generate_guide_draft.py samples/processed/prototype-demo/procedure_trace.json --use-anthropic --output artifacts/generated/prototype-demo/guide_draft.json",
     "prototype:docx": "python scripts/build_guide_docx.py artifacts/generated/prototype-demo/guide_draft.json --output artifacts/generated/prototype-demo/user_guide.docx",
-    "prototype:qa": "python scripts/qa_document_artifacts.py artifacts/generated/prototype-demo/user_guide.docx"
+    "prototype:qa": "python scripts/qa_document_artifacts.py artifacts/generated/prototype-demo/user_guide.docx",
+    "app:start": "python scripts/app_server.py --host 127.0.0.1 --port 8765"
   }
 }

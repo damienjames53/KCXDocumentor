@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>KCXDocumentor Prototype Console</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <h1>KCXDocumentor</h1>
+        <p>Local video-to-guide testing console</p>
+      </div>
+      <div class="status-strip" aria-live="polite">
+        <span id="apiStatus" class="status-pill neutral">API not checked</span>
+        <button id="refreshAll" class="icon-button" type="button" title="Refresh recordings and sessions">Refresh</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="panel pipeline-panel" aria-labelledby="pipelineTitle">
+        <div class="panel-heading">
+          <h2 id="pipelineTitle">Pipeline</h2>
+          <span id="selectedSessionPill" class="status-pill neutral">No session selected</span>
+        </div>
+
+        <form id="pipelineForm" class="stack">
+          <label>
+            <span>Recording</span>
+            <select id="recordingSelect" name="recording" required>
+              <option value="">Loading recordings...</option>
+            </select>
+          </label>
+
+          <div class="field-grid">
+            <label>
+              <span>Target application</span>
+              <input id="targetApplication" name="targetApplication" autocomplete="off" placeholder="Enterprise Rx">
+            </label>
+            <label>
+              <span>Session id</span>
+              <input id="sessionIdInput" name="sessionId" autocomplete="off" placeholder="optional-stable-id">
+            </label>
+          </div>
+
+          <div class="option-row">
+            <label class="check">
+              <input id="forceProcess" type="checkbox" checked>
+              <span>Replace existing session</span>
+            </label>
+            <label class="check">
+              <input id="noMediaTools" type="checkbox">
+              <span>Skip media tools</span>
+            </label>
+          </div>
+
+          <div class="button-row">
+            <button id="processButton" type="submit">Process Recording</button>
+            <button id="deterministicDraftButton" type="button">Deterministic Draft</button>
+            <button id="anthropicDraftButton" type="button">Anthropic Draft</button>
+            <button id="buildDocxButton" type="button">Build DOCX</button>
+            <button id="qaDocxButton" type="button">Run QA</button>
+          </div>
+        </form>
+
+        <div class="split-list">
+          <div>
+            <div class="subheading">
+              <h3>Recordings</h3>
+              <span id="recordingCount">0</span>
+            </div>
+            <ul id="recordingList" class="compact-list"></ul>
+          </div>
+          <div>
+            <div class="subheading">
+              <h3>Sessions</h3>
+              <span id="sessionCount">0</span>
+            </div>
+            <ul id="sessionList" class="compact-list"></ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel session-panel" aria-labelledby="sessionTitle">
+        <div class="panel-heading">
+          <h2 id="sessionTitle">Session Review</h2>
+          <button id="reloadSession" class="secondary" type="button">Reload Session</button>
+        </div>
+
+        <div id="summaryCards" class="summary-grid">
+          <article>
+            <span class="metric-label">Duration</span>
+            <strong id="durationMetric">--</strong>
+          </article>
+          <article>
+            <span class="metric-label">Segments</span>
+            <strong id="segmentMetric">--</strong>
+          </article>
+          <article>
+            <span class="metric-label">Review Needed</span>
+            <strong id="reviewMetric">--</strong>
+          </article>
+          <article>
+            <span class="metric-label">Images</span>
+            <strong id="imageMetric">--</strong>
+          </article>
+        </div>
+
+        <div class="tabs" role="tablist" aria-label="Session views">
+          <button class="tab active" type="button" data-tab="trace">Trace</button>
+          <button class="tab" type="button" data-tab="frames">Frames</button>
+          <button class="tab" type="button" data-tab="artifacts">Artifacts</button>
+          <button class="tab" type="button" data-tab="json">JSON</button>
+        </div>
+
+        <div id="traceTab" class="tab-panel active">
+          <div id="segmentList" class="segment-list empty-state">Select or process a session to inspect trace segments.</div>
+        </div>
+
+        <div id="framesTab" class="tab-panel">
+          <div id="frameGrid" class="frame-grid empty-state">Candidate frames will appear after processing.</div>
+        </div>
+
+        <div id="artifactsTab" class="tab-panel">
+          <div id="artifactList" class="artifact-list empty-state">Generated draft, DOCX, and QA artifacts will appear here.</div>
+        </div>
+
+        <div id="jsonTab" class="tab-panel">
+          <pre id="jsonPreview" class="json-preview">{}</pre>
+        </div>
+      </section>
+
+      <aside class="panel readiness-panel" aria-labelledby="readinessTitle">
+        <div class="panel-heading">
+          <h2 id="readinessTitle">Readiness</h2>
+          <span id="readinessPill" class="status-pill neutral">Pending</span>
+        </div>
+
+        <div id="readinessList" class="readiness-list">
+          <div class="empty-state">No session loaded.</div>
+        </div>
+
+        <div class="qa-box">
+          <h3>Latest Activity</h3>
+          <ol id="activityLog" class="activity-log" aria-live="polite"></ol>
+        </div>
+      </aside>
+    </main>
+
+    <template id="activityTemplate">
+      <li>
+        <span class="activity-time"></span>
+        <span class="activity-message"></span>
+      </li>
+    </template>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

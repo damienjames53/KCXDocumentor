@@ -57,3 +57,15 @@ npm run eval:offline
 The same flow is also available through `npm run prototype:process`, `npm run prototype:draft`, `npm run prototype:docx`, and `npm run prototype:qa` when `python` points at an environment with the Python dependencies installed.
 
 See `docs/prototype-runbook.md` for the current run criteria.
+
+## Local Testing App
+
+Start the local browser console:
+
+```bash
+.venv/bin/python scripts/app_server.py --host 127.0.0.1 --port 8765
+```
+
+Then open `http://127.0.0.1:8765`.
+
+The app lists recordings from `samples/raw/`, processes a selected recording into `samples/processed/`, generates deterministic or Anthropic guide drafts, builds DOCX files, and runs DOCX QA checks.
