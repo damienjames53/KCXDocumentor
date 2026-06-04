@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -9,6 +10,10 @@ from zipfile import ZipFile
 
 import pytest
 from docx import Document
+try:
+    from PIL import Image
+except ImportError:  # pragma: no cover - optional visual QA dependency
+    Image = None
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +23,7 @@ GUIDE_DRAFT_SCRIPT = ROOT / "scripts" / "generate_guide_draft.py"
 PROCESS_RECORDING_SCRIPT = ROOT / "scripts" / "process_recording.py"
 BUILD_GUIDE_DOCX_SCRIPT = ROOT / "scripts" / "build_guide_docx.py"
 COMPARE_TRANSCRIPTS_SCRIPT = ROOT / "scripts" / "compare_transcripts.py"
+APP_SERVER_SCRIPT = ROOT / "scripts" / "app_server.py"
 
 
 def load_module(path: Path, name: str):
@@ -215,6 +221,48 @@ def test_build_guide_docx_accepts_section_based_anthropic_shape(tmp_path: Path) 
     assert "Screenshots require human approval" in comments_xml
 
 
+def test_build_guide_docx_converts_markdown_bold_to_word_runs(tmp_path: Path) -> None:
+    input_path = tmp_path / "bold-draft.json"
+    output_path = tmp_path / "bold-guide.docx"
+    input_path.write_text(
+        json.dumps(
+            {
+                "title": "Bold Guide",
+                "summary": "Use **Blink RX** safely.",
+                "workflow_overview": ["Open the **Interfaces** tab."],
+                "steps": [
+                    {
+                        "title": "Configure Blink",
+                        "instruction": "Set **Customer Type** to **Blink**.",
+                        "expectedResult": "The **AR account** is selected.",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(BUILD_GUIDE_DOCX_SCRIPT), str(input_path), "--output", str(output_path)],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    doc = Document(output_path)
+    paragraph_text = "\n".join(paragraph.text for paragraph in doc.paragraphs)
+    assert "**" not in paragraph_text
+    bold_run_text = {
+        run.text
+        for paragraph in doc.paragraphs
+        for run in paragraph.runs
+        if run.bold
+    }
+    assert {"Blink RX", "Interfaces", "Customer Type", "Blink", "AR account"}.issubset(bold_run_text)
+
+
 def test_build_guide_docx_places_reviewer_concerns_in_comments_not_body(tmp_path: Path) -> None:
     input_path = tmp_path / "review-draft.json"
     output_path = tmp_path / "review-guide.docx"
@@ -270,6 +318,332 @@ def test_build_guide_docx_places_reviewer_concerns_in_comments_not_body(tmp_path
         comments_xml = package.read("word/comments.xml").decode("utf-8")
     assert "Confirm the screenshot does not include Teams controls." in comments_xml
     assert "Transcript confidence is below publication threshold." in comments_xml
+
+
+def test_build_guide_docx_cleans_redundant_step_headings_and_source_recording_metadata(tmp_path: Path) -> None:
+    input_path = tmp_path / "blink-draft.json"
+    output_path = tmp_path / "blink-guide.docx"
+    input_path.write_text(
+        json.dumps(
+            {
+                "title": "Blink Rx User Guide",
+                "summary": "Use this guide to complete the Blink Rx workflow.",
+                "sourceRecording": {
+                    "sourceFile": "samples/raw/Blink Rx Training Part 2 120525.mp4",
+                    "targetApplication": "Blink Rx",
+                    "durationSeconds": 1242,
+                },
+                "sections": [
+                    {
+                        "title": "Submit a Refill Request",
+                        "steps": [
+                            {
+                                "title": "Step 5 — Submit a Refill Request: Step 14",
+                                "instruction": "Select Submit to send the refill request.",
+                                "expectedResult": "The refill request is submitted.",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(BUILD_GUIDE_DOCX_SCRIPT), str(input_path), "--output", str(output_path)],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    doc = Document(output_path)
+    body_text = "\n".join(paragraph.text for paragraph in doc.paragraphs)
+    table_text = "\n".join(cell.text for table in doc.tables for row in table.rows for cell in row.cells)
+    assert "1. Submit a Refill Request" in body_text
+    assert "Submit a Refill Request: Step 14" not in body_text
+    assert "Application\nBlink Rx" in table_text
+    assert "Application\nNot specified" not in table_text
+
+
+def test_build_guide_docx_uses_document_metadata_from_anthropic_draft(tmp_path: Path) -> None:
+    input_path = tmp_path / "document-metadata-draft.json"
+    output_path = tmp_path / "document-metadata-guide.docx"
+    input_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "sessionId": "blink-rx-part-2-sidecar",
+                "document": {
+                    "title": "Blink Rx Workflow Guide",
+                    "targetApplication": "Blink Rx",
+                    "durationSeconds": 1241.601,
+                    "sourceRecording": "Blink Rx Training Part 2 120525.mp4",
+                },
+                "sections": [
+                    {
+                        "title": "Submit a Refill Request",
+                        "steps": [
+                            {
+                                "title": "Initiate the refill request",
+                                "instruction": "Set the refill initiation flag to true.",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(BUILD_GUIDE_DOCX_SCRIPT), str(input_path), "--output", str(output_path)],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    doc = Document(output_path)
+    table_text = "\n".join(cell.text for table in doc.tables for row in table.rows for cell in row.cells)
+    assert "Application\nBlink Rx" in table_text
+    assert "Recording Duration\n00:20:42" in table_text
+    assert "Recording Duration\n1241.601" not in table_text
+    assert "Source Recording\nBlink Rx Training Part 2 120525.mp4" in table_text
+
+
+def test_build_guide_docx_replaces_internal_purpose_and_prerequisite_language(tmp_path: Path) -> None:
+    input_path = tmp_path / "customer-safe-draft.json"
+    output_path = tmp_path / "customer-safe-guide.docx"
+    input_path.write_text(
+        json.dumps(
+            {
+                "title": "Blink Rx Workflow Guide",
+                "summary": "This guide was generated from a local procedure trace.",
+                "document": {
+                    "description": "This guide covers refill requests and pharmacy profile plan template configuration in Blink Rx.",
+                    "targetApplication": "Blink Rx",
+                },
+                "prerequisites": [
+                    "Confirm access to the target application and review the source recording context before publishing."
+                ],
+                "steps": [
+                    {
+                        "title": "Open the refill workflow",
+                        "instruction": "Open the refill request workflow.",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(BUILD_GUIDE_DOCX_SCRIPT), str(input_path), "--output", str(output_path)],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    doc = Document(output_path)
+    body_text = "\n".join(paragraph.text for paragraph in doc.paragraphs)
+    assert "This guide covers refill requests and pharmacy profile plan template configuration in Blink Rx." in body_text
+    assert "generated from a local procedure trace" not in body_text
+    assert "before publishing" not in body_text
+    assert "application reviewer" not in body_text
+    assert "You have access to Blink Rx and the permissions needed to complete this workflow." in body_text
+
+
+def test_build_guide_docx_omits_generation_metadata_from_delivered_docx(tmp_path: Path) -> None:
+    input_path = tmp_path / "usage-draft.json"
+    output_path = tmp_path / "usage-guide.docx"
+    input_path.write_text(
+        json.dumps(
+            {
+                "generatedAt": "2026-06-04T16:34:09Z",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 12847,
+                    "output_tokens": 3201,
+                    "totalTokens": 16048,
+                    "estimatedCostUSD": 0.086,
+                },
+                "guideDraft": {
+                    "title": "Blink Rx Workflow Guide",
+                    "summary": "This guide covers refill requests in Blink Rx.",
+                    "sourceRecording": {"targetApplication": "Blink Rx"},
+                    "steps": [
+                        {
+                            "title": "Open the refill workflow",
+                            "instruction": "Open the refill request workflow.",
+                        }
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(BUILD_GUIDE_DOCX_SCRIPT), str(input_path), "--output", str(output_path)],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    doc = Document(output_path)
+    headings = "\n".join(paragraph.text for paragraph in doc.paragraphs)
+    table_text = "\n".join(cell.text for table in doc.tables for row in table.rows for cell in row.cells)
+    assert "Appendix: Generation Metadata" not in headings
+    assert "Input Tokens" not in table_text
+    assert "Output Tokens" not in table_text
+    assert "Total Tokens" not in table_text
+    assert "Estimated Cost" not in table_text
+
+
+def test_build_guide_docx_adds_reviewer_comments_for_ambiguous_terms_without_body_pollution(tmp_path: Path) -> None:
+    input_path = tmp_path / "ambiguous-terms-draft.json"
+    output_path = tmp_path / "ambiguous-terms-guide.docx"
+    input_path.write_text(
+        json.dumps(
+            {
+                "title": "Blink Rx Workflow Guide",
+                "summary": "This guide covers the Blink Rx refill workflow.",
+                "sourceRecording": {"targetApplication": "Blink Rx"},
+                "steps": [
+                    {
+                        "title": "Confirm required checkbox selections",
+                        "instruction": "Select all required checkboxes before choosing PV1 and PDR.",
+                        "expectedResult": "The refill request is ready for review.",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(BUILD_GUIDE_DOCX_SCRIPT), str(input_path), "--output", str(output_path)],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    doc = Document(output_path)
+    body_text = "\n".join(paragraph.text for paragraph in doc.paragraphs)
+    assert "Select all required checkboxes before choosing PV1 and PDR." in body_text
+    assert "Verify that 'PV1'" not in body_text
+    assert "Verify the exact required checkbox labels" not in body_text
+    with ZipFile(output_path) as package:
+        comments_xml = package.read("word/comments.xml").decode("utf-8")
+    assert "Verify that 'PV1' is the correct UI term" in comments_xml
+    assert "Verify that 'PDR' is the correct UI term" in comments_xml
+    assert "Verify the exact required checkbox labels" in comments_xml
+
+
+def test_build_guide_docx_routes_dark_meeting_frame_to_reviewer_comment(tmp_path: Path) -> None:
+    if Image is None:
+        pytest.skip("Pillow is not installed")
+    image_path = tmp_path / "teams-card.png"
+    Image.new("RGB", (320, 180), color=(0, 0, 0)).save(image_path)
+    input_path = tmp_path / "dark-frame-draft.json"
+    output_path = tmp_path / "dark-frame-guide.docx"
+    input_path.write_text(
+        json.dumps(
+            {
+                "title": "Dark Frame Guide",
+                "summary": "Use this guide to complete the workflow.",
+                "steps": [
+                    {
+                        "title": "Understand the template setting",
+                        "instruction": "Review the plan template behavior.",
+                        "screenshot": str(image_path),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(BUILD_GUIDE_DOCX_SCRIPT), str(input_path), "--output", str(output_path)],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    doc = Document(output_path)
+    body_text = "\n".join(paragraph.text for paragraph in doc.paragraphs)
+    assert "Candidate screenshot" not in body_text
+    assert "No screenshot was available" not in body_text
+    assert "non-application Teams or meeting frame" not in body_text
+    with ZipFile(output_path) as package:
+        comments_xml = package.read("word/comments.xml").decode("utf-8")
+        document_xml = package.read("word/document.xml").decode("utf-8")
+    assert "non-application Teams or meeting frame" in comments_xml
+    assert "teams-card.png" not in document_xml
+
+
+def test_build_guide_docx_preserves_detailed_review_guidance_in_comments(tmp_path: Path) -> None:
+    input_path = tmp_path / "review-guidance-draft.json"
+    output_path = tmp_path / "review-guidance-guide.docx"
+    input_path.write_text(
+        json.dumps(
+            {
+                "title": "Guidance Comment Guide",
+                "summary": "Use this guide to complete the workflow.",
+                "reviewGuidance": [
+                    {
+                        "id": "review-021",
+                        "severity": "warning",
+                        "description": "Verify segment seg-0021 because the narrator describes the pharmacy profile template quickly.",
+                        "resolution": "Review the live application if the selected frame does not show the template fields.",
+                    }
+                ],
+                "steps": [
+                    {
+                        "title": "Review the pharmacy profile template",
+                        "instruction": "Review the pharmacy profile template fields.",
+                        "expectedResult": "The profile template is ready for review.",
+                        "reviewerGuidance": [
+                            "Segment seg-0021 has low transcript confidence; confirm plan-template terminology before publishing."
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(BUILD_GUIDE_DOCX_SCRIPT), str(input_path), "--output", str(output_path)],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    doc = Document(output_path)
+    body_text = "\n".join(paragraph.text for paragraph in doc.paragraphs)
+    assert "low transcript confidence" not in body_text
+    assert "review-021" not in body_text
+    with ZipFile(output_path) as package:
+        comments_xml = package.read("word/comments.xml").decode("utf-8")
+    assert "Segment seg-0021 has low transcript confidence" in comments_xml
+    assert "review-021" in comments_xml
+    assert "pharmacy profile template" in comments_xml
 
 
 def test_docx_builder_resolves_processed_session_frame_assets(tmp_path: Path) -> None:
@@ -418,9 +792,8 @@ def test_compact_procedure_trace_contract_for_one_hour_recordings(tmp_path: Path
     assert loaded["steps"][0]["candidate_images"][0].endswith(".webp")
 
 
-def test_deterministic_guide_draft_generator_preserves_review_flags(tmp_path: Path) -> None:
-    trace_path = tmp_path / "procedure_trace.json"
-    output_path = tmp_path / "guide_draft.json"
+def test_guide_draft_generator_requires_anthropic_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_module(GUIDE_DRAFT_SCRIPT, "generate_guide_draft_anthropic_required")
     trace = {
         "schemaVersion": 1,
         "recording": {
@@ -446,23 +819,336 @@ def test_deterministic_guide_draft_generator_preserves_review_flags(tmp_path: Pa
             }
         ],
     }
-    trace_path.write_text(json.dumps(trace), encoding="utf-8")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-    result = subprocess.run(
-        [sys.executable, str(GUIDE_DRAFT_SCRIPT), str(trace_path), "--output", str(output_path)],
-        cwd=ROOT,
-        check=False,
-        text=True,
-        capture_output=True,
+    with pytest.raises(SystemExit, match="ANTHROPIC_API_KEY is required"):
+        module.generate_with_anthropic(
+            trace,
+            type(
+                "Args",
+                (),
+                {
+                    "model": "claude-sonnet-4-6",
+                    "max_tokens": 100,
+                    "temperature": 0.2,
+                    "prompt_version": "guide-draft-v1",
+                },
+            )(),
+        )
+
+
+def test_prepare_trace_for_anthropic_prunes_rejected_frames_and_preserves_review_guidance() -> None:
+    module = load_module(GUIDE_DRAFT_SCRIPT, "generate_guide_draft_prepare_trace")
+    trace = {
+        "schemaVersion": 1,
+        "reviewGuidance": [{"type": "existing", "message": "Confirm terminology."}],
+        "segments": [
+            {
+                "id": "seg-0001",
+                "candidateImages": [
+                    {
+                        "frameId": "frame-approved",
+                        "path": "frames/frame-approved.png",
+                        "timestamp": "00:01:00.000",
+                        "timestampSeconds": 60.0,
+                        "created": True,
+                        "reviewStatus": "approved",
+                    },
+                    {
+                        "frameId": "frame-rejected",
+                        "path": "frames/frame-rejected.png",
+                        "timestamp": "00:01:30.000",
+                        "timestampSeconds": 90.0,
+                        "created": True,
+                        "reviewStatus": "rejected",
+                        "reviewNote": "Do not use this Teams title card.",
+                    },
+                ],
+            }
+        ],
+    }
+
+    prepared = module.prepare_trace_for_anthropic(trace)
+    candidate_ids = [
+        image["frameId"]
+        for segment in prepared["segments"]
+        for image in segment["candidateImages"]
+    ]
+
+    assert candidate_ids == ["frame-approved"]
+    assert trace["segments"][0]["candidateImages"][1]["frameId"] == "frame-rejected"
+    assert prepared["excludedFrames"][0]["frameId"] == "frame-rejected"
+    assert prepared["excludedFrames"][0]["sourceSegmentId"] == "seg-0001"
+    assert "Do not use this Teams title card." in json.dumps(prepared["reviewGuidance"])
+    assert "Confirm terminology." in json.dumps(prepared["reviewGuidance"])
+
+
+def test_anthropic_payload_excludes_rejected_frame_candidates_but_keeps_notes(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_module(GUIDE_DRAFT_SCRIPT, "generate_guide_draft_payload_contract")
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps({"title": "Guide", "steps": []}),
+                        }
+                    ],
+                    "usage": {"input_tokens": 12847, "output_tokens": 3201},
+                }
+            ).encode("utf-8")
+
+    def fake_urlopen(req, timeout):
+        payload = json.loads(req.data.decode("utf-8"))
+        user_prompt = json.loads(payload["messages"][0]["content"])
+        captured["procedureTrace"] = user_prompt["procedureTrace"]
+        return FakeResponse()
+
+    trace = {
+        "sessionId": "demo-session",
+        "segments": [
+            {
+                "id": "seg-0001",
+                "candidateImages": [
+                    {
+                        "frameId": "keep-me",
+                        "path": "frames/keep-me.png",
+                        "created": True,
+                        "reviewStatus": "pending",
+                    },
+                    {
+                        "frameId": "reject-me",
+                        "path": "frames/reject-me.png",
+                        "created": True,
+                        "reviewStatus": "rejected",
+                        "reviewNote": "Rejected because it shows meeting controls.",
+                    },
+                ],
+            }
+        ],
+    }
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(module.request, "urlopen", fake_urlopen)
+
+    draft = module.generate_with_anthropic(
+        trace,
+        type(
+            "Args",
+            (),
+            {
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 100,
+                "temperature": 0.2,
+                "prompt_version": "guide-draft-v1",
+            },
+        )(),
     )
 
-    assert result.returncode == 0, result.stdout + result.stderr
-    draft = json.loads(output_path.read_text(encoding="utf-8"))
-    assert draft["model"]["provider"] == "local-deterministic"
-    assert draft["model"]["promptVersion"] == "guide-draft-v1"
-    assert draft["steps"][0]["instruction"].startswith("Click Save")
-    assert draft["steps"][0]["needsHumanReview"] is True
-    assert draft["reviewFlags"][0]["segmentId"] == "seg-0001"
+    procedure_trace = captured["procedureTrace"]
+    candidate_ids = [
+        image["frameId"]
+        for segment in procedure_trace["segments"]
+        for image in segment["candidateImages"]
+    ]
+    assert candidate_ids == ["keep-me"]
+    assert procedure_trace["excludedFrames"][0]["frameId"] == "reject-me"
+    assert "Rejected because it shows meeting controls." in json.dumps(procedure_trace["reviewGuidance"])
+    assert draft["generatedAt"].endswith("Z")
+    assert draft["model"]["model"] == "claude-sonnet-4-6"
+    assert draft["usage"] == {
+        "inputTokens": 12847,
+        "outputTokens": 3201,
+        "totalTokens": 16048,
+        "estimatedCostUSD": 0.086556,
+    }
+
+
+def test_generation_report_is_written_next_to_anthropic_draft(tmp_path: Path) -> None:
+    module = load_module(GUIDE_DRAFT_SCRIPT, "generate_guide_draft_generation_report")
+    draft_path = tmp_path / "session" / "guide_draft.anthropic.json"
+    module.USAGE_DB_PATH = tmp_path / "usage" / "generation_usage.sqlite3"
+    draft_path.parent.mkdir(parents=True)
+    draft = {
+        "generatedAt": "2026-06-04T16:34:09Z",
+        "sessionId": "demo-session",
+        "document": {"title": "Blink Rx Workflow Guide"},
+        "model": {
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-6",
+            "promptVersion": "guide-draft-v1",
+        },
+        "usage": {
+            "inputTokens": 12847,
+            "outputTokens": 3201,
+            "totalTokens": 16048,
+            "estimatedCostUSD": 0.086556,
+        },
+    }
+
+    report_path = module.write_generation_report(draft_path, draft)
+
+    assert report_path == draft_path.parent / "generation_report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    expected = {
+        "schemaVersion": 1,
+        "status": "succeeded",
+        "generatedAt": "2026-06-04T16:34:09Z",
+        "sessionId": "demo-session",
+        "title": "Blink Rx Workflow Guide",
+        "model": "claude-sonnet-4-6",
+        "provider": "anthropic",
+        "promptVersion": "guide-draft-v1",
+        "usage": {
+            "inputTokens": 12847,
+            "outputTokens": 3201,
+            "totalTokens": 16048,
+            "estimatedCostUSD": 0.086556,
+        },
+    }
+    expected["generationRunId"] = module.generation_run_id(expected)
+    assert report == expected
+    with sqlite3.connect(module.USAGE_DB_PATH) as connection:
+        row = connection.execute(
+            """
+            SELECT generation_run_id, session_id, input_tokens, output_tokens,
+                   total_tokens, estimated_cost_usd, status, error_message
+            FROM generation_usage
+            """
+        ).fetchone()
+    assert row == (
+        expected["generationRunId"],
+        "demo-session",
+        12847,
+        3201,
+        16048,
+        0.086556,
+        "succeeded",
+        "",
+    )
+
+
+def test_anthropic_invalid_json_records_failed_usage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_module(GUIDE_DRAFT_SCRIPT, "generate_guide_draft_failed_usage")
+    module.USAGE_DB_PATH = tmp_path / "usage" / "generation_usage.sqlite3"
+    trace_path = tmp_path / "procedure_trace.json"
+    output_path = tmp_path / "generated" / "guide_draft.anthropic.json"
+    trace_path.write_text(
+        json.dumps({"schemaVersion": 1, "sessionId": "failed-session", "segments": []}),
+        encoding="utf-8",
+    )
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {
+                    "content": [{"type": "text", "text": '{"title":"Unfinished"'}],
+                    "usage": {"input_tokens": 2000, "output_tokens": 500},
+                }
+            ).encode("utf-8")
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(module.request, "urlopen", lambda req, timeout: FakeResponse())
+    monkeypatch.setattr(sys, "argv", ["generate_guide_draft.py", str(trace_path), "--output", str(output_path)])
+
+    result = module.main()
+
+    assert result == 1
+    assert not output_path.exists()
+    failure_path = output_path.parent / "generation_failure.json"
+    failure = json.loads(failure_path.read_text(encoding="utf-8"))
+    assert failure["status"] == "failed"
+    assert failure["sessionId"] == "failed-session"
+    assert failure["usage"] == {
+        "inputTokens": 2000,
+        "outputTokens": 500,
+        "totalTokens": 2500,
+        "estimatedCostUSD": 0.0135,
+    }
+    assert "invalid guide JSON" in failure["errorMessage"]
+    with sqlite3.connect(module.USAGE_DB_PATH) as connection:
+        row = connection.execute(
+            """
+            SELECT session_id, total_tokens, estimated_cost_usd, status, error_message
+            FROM generation_usage
+            """
+        ).fetchone()
+    assert row[0] == "failed-session"
+    assert row[1] == 2500
+    assert row[2] == 0.0135
+    assert row[3] == "failed"
+    assert "invalid guide JSON" in row[4]
+
+
+def test_app_server_summarizes_generation_usage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    module = load_module(APP_SERVER_SCRIPT, "app_server_generation_summary")
+    processed_root = tmp_path / "processed"
+    generated_root = tmp_path / "generated"
+    session_dir = processed_root / "demo-session"
+    generated_dir = generated_root / "demo-session"
+    session_dir.mkdir(parents=True)
+    generated_dir.mkdir(parents=True)
+    (session_dir / "manifest.json").write_text(json.dumps({"createdUtc": "2026-06-04T16:00:00Z"}), encoding="utf-8")
+    (session_dir / "procedure_trace.json").write_text(
+        json.dumps(
+            {
+                "sessionId": "demo-session",
+                "recording": {"targetApplication": "Blink Rx", "durationSeconds": 1241.601},
+                "segments": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (generated_dir / "generation_report.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "generatedAt": "2026-06-04T16:34:09Z",
+                "model": "claude-sonnet-4-6",
+                "provider": "anthropic",
+                "promptVersion": "guide-draft-v1",
+                "usage": {
+                    "inputTokens": 12847,
+                    "outputTokens": 3201,
+                    "totalTokens": 16048,
+                    "estimatedCostUSD": 0.086556,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "PROCESSED_ROOT", processed_root)
+    monkeypatch.setattr(module, "GENERATED_ROOT", generated_root)
+    monkeypatch.setattr(module, "WORKSPACE", tmp_path)
+
+    session = module.read_session(session_dir)
+
+    assert session["generation"] == {
+        "model": "claude-sonnet-4-6",
+        "provider": "anthropic",
+        "promptVersion": "guide-draft-v1",
+        "generatedAt": "2026-06-04T16:34:09Z",
+        "inputTokens": 12847,
+        "outputTokens": 3201,
+        "totalTokens": 16048,
+        "estimatedCostUSD": 0.086556,
+        "status": "succeeded",
+        "errorMessage": "",
+    }
 
 
 def test_process_recording_accepts_sidecar_transcript_without_media_tools(tmp_path: Path) -> None:

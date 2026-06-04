@@ -33,6 +33,17 @@ http://127.0.0.1:8765
 
 If `web/index.html` does not exist yet, static root requests will return a 404 JSON response. The API endpoints still work.
 
+## BA/Trainer Workflow
+
+The console is organized around the shortest safe path to a reviewable guide:
+
+1. Import or select a recording.
+2. Import or select a transcript when one exists. Teams sidecar transcripts should be preferred; leaving the transcript blank falls back to local Whisper during processing.
+3. Choose **Process Recording** to create a trace and candidate screenshots.
+4. Review frames before guide generation. Approved frames are preferred, rejected frames are excluded from screenshot candidates, and rejected-frame notes are preserved as reviewer guidance.
+5. Choose **Create Guide** to generate guide content and prepare the DOCX.
+6. Choose **Download DOCX** or use the DOCX download link in the Artifacts tab. Use **Re-run QA** as a secondary status check after guide or screenshot changes.
+
 ## Endpoints
 
 `POST /api/import-recording`
@@ -93,6 +104,26 @@ Lists processed sessions under `samples/processed` and any generated files under
 
 Returns a session summary, summaries of known JSON artifacts, and generated output files.
 
+`POST /api/delete-session`
+
+Deletes one processed session folder and its matching generated artifacts folder:
+
+- `samples/processed/<sessionId>`
+- `artifacts/generated/<sessionId>`
+
+```json
+{
+  "sessionId": "local-test"
+}
+```
+
+The endpoint validates `sessionId`, resolves both target directories under their allowed roots, and rejects path traversal or symlink escapes. Generated artifacts remain ignored and untracked.
+
+The prototype UI exposes this cleanup in two places:
+
+- Use **Delete Session** in the selected session header to remove the loaded session.
+- Use **Delete** beside a session in the Sessions list to remove stale sessions without loading them first.
+
 `POST /api/process`
 
 Runs `scripts/process_recording.py`.
@@ -114,29 +145,80 @@ Use `"sourceProfile": "teams-recording"` for Microsoft Teams recordings that inc
 
 `POST /api/generate-draft`
 
-Runs `scripts/generate_guide_draft.py` against `samples/processed/<sessionId>/procedure_trace.json`.
+Runs `scripts/generate_guide_draft.py` against `samples/processed/<sessionId>/procedure_trace.json`. In the local UI this is part of the **Create Guide** workflow.
 
 ```json
 {
-  "sessionId": "local-test",
-  "useAnthropic": false
+  "sessionId": "local-test"
 }
 ```
 
-When `useAnthropic` is true, the underlying script uses `ANTHROPIC_API_KEY` from the process environment or `.env`. The server does not print environment variables or secrets.
+The underlying script uses `ANTHROPIC_API_KEY` from the process environment or `.env`. The server does not print environment variables or secrets.
+
+When `artifacts/generated/<sessionId>/guide_draft.anthropic.json` includes Anthropic generation metadata such as `model`, `generatedAt`, and `usage`, the local console surfaces the model, token totals, estimated cost, and timestamp in the Artifacts view and Readiness checks.
+
+The selected session's current generation token cost remains visible in the Artifacts tab after the draft metadata is available. Aggregate token reporting lives on the top-level **AI Spend** page in the main navigation, with the current calendar month spend also visible in the header.
+
+Generation usage is persisted in the local SQLite database at `artifacts/usage/generation_usage.sqlite3`. This database is outside the processed session and generated artifact folders, so **Delete Session** removes the working artifacts but does not erase historical token/cost reporting.
+
+`GET /api/usage-summary?range=<day|week|month|year>`
+
+Returns aggregate generation usage for the local app dashboard. The UI calls this endpoint when the AI Spend page opens, when the range selector changes, and after a draft is generated.
+
+Expected response:
+
+```json
+{
+  "range": "week",
+  "generatedAt": "2026-06-04T15:30:00Z",
+  "totals": {
+    "documents": 3,
+    "attempts": 4,
+    "failedAttempts": 1,
+    "inputTokens": 42000,
+    "outputTokens": 8600,
+    "totalTokens": 50600,
+    "estimatedCostUSD": 0.8721
+  },
+  "buckets": [
+    {
+      "label": "2026-W23",
+      "totals": {
+        "documents": 1,
+        "attempts": 2,
+        "failedAttempts": 1,
+        "inputTokens": 14000,
+        "outputTokens": 2800,
+        "totalTokens": 16800,
+        "estimatedCostUSD": 0.2907
+      }
+    }
+  ]
+}
+```
+
+Each bucket document entry includes `status` and `errorMessage`. Failed attempts are included in token and cost totals, but they do not increment the successful `documents` count. The response also includes `days` for compatibility when the selected range is `day`. If the endpoint is not available yet, the dashboard leaves usage metrics blank and shows a non-blocking empty state.
 
 `POST /api/build-docx`
 
-Runs `scripts/build_guide_docx.py` against the selected generated draft.
+Runs `scripts/build_guide_docx.py` against `guide_draft.anthropic.json`. In the local UI this prepares the DOCX surfaced by **Download DOCX** and the Artifacts tab.
+
+```json
+{
+  "sessionId": "local-test"
+}
+```
+
+`POST /api/qa-docx`
+
+Runs local document QA against the generated DOCX. The UI treats this as a secondary **Re-run QA** status action rather than a required primary step.
 
 ```json
 {
   "sessionId": "local-test",
-  "draft": "deterministic"
+  "strict": true
 }
 ```
-
-The `draft` value must be `deterministic` or `anthropic`.
 
 `GET /api/frame-review?sessionId=<id>`
 
@@ -251,11 +333,20 @@ curl -X POST http://127.0.0.1:8765/api/process \
 
 curl -X POST http://127.0.0.1:8765/api/generate-draft \
   -H 'Content-Type: application/json' \
-  -d '{"sessionId":"local-test","useAnthropic":false}'
+  -d '{"sessionId":"local-test"}'
 
 curl -X POST http://127.0.0.1:8765/api/build-docx \
   -H 'Content-Type: application/json' \
-  -d '{"sessionId":"local-test","draft":"deterministic"}'
+  -d '{"sessionId":"local-test"}'
+
+curl -X POST http://127.0.0.1:8765/api/qa-docx \
+  -H 'Content-Type: application/json' \
+  -d '{"sessionId":"local-test","strict":true}'
+
+curl 'http://127.0.0.1:8765/api/usage-summary?range=week'
 ```
 
 Generated outputs are written under `artifacts/generated/<sessionId>/`.
+Generation usage metadata is retained in JSON artifacts, SQLite reporting, and the local console. It is intentionally omitted from delivered DOCX guides.
+
+Use **Delete Session** in the local UI when a processed recording or generated output has been removed and the stale session still appears in the session list. The control removes the processed session and matching generated artifacts, refreshes the session list, leaves files in `samples/raw` untouched, and preserves `artifacts/usage/generation_usage.sqlite3` for usage reporting.

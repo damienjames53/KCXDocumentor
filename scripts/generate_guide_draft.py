@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import sqlite3
 import sys
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 from urllib import error, request
@@ -15,6 +17,15 @@ WORKSPACE = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL = "claude-sonnet-4-6"
 DEFAULT_PROMPT_VERSION = "guide-draft-v1"
 ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+SONNET_4_6_INPUT_COST_PER_MILLION = 3.00
+SONNET_4_6_OUTPUT_COST_PER_MILLION = 15.00
+USAGE_DB_PATH = WORKSPACE / "artifacts" / "usage" / "generation_usage.sqlite3"
+
+
+class AnthropicDraftError(Exception):
+    def __init__(self, message: str, report: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.report = report
 
 
 def main() -> int:
@@ -27,15 +38,20 @@ def main() -> int:
 
     trace = json.loads(trace_path.read_text(encoding="utf-8"))
     trace = apply_frame_review(trace, trace_path)
-    if args.use_anthropic:
+    try:
         draft = generate_with_anthropic(trace, args)
-    else:
-        draft = generate_deterministic_draft(trace, args)
+    except AnthropicDraftError as exc:
+        failure_path = write_generation_failure(args.output, exc.report)
+        print(f"Generation failed: {exc}", file=sys.stderr)
+        print(f"Wrote {failure_path.resolve()}", file=sys.stderr)
+        return 1
     draft = attach_screenshot_references(draft, trace)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(draft, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    report_path = write_generation_report(args.output, draft)
     print(f"Wrote {args.output.resolve()}")
+    print(f"Wrote {report_path.resolve()}")
     return 0
 
 
@@ -63,90 +79,17 @@ def parse_args() -> argparse.Namespace:
         default=WORKSPACE / "artifacts" / "generated" / "guide_draft.json",
         help="Output guide draft JSON path.",
     )
-    parser.add_argument("--use-anthropic", action="store_true", help="Call Anthropic Messages API instead of deterministic local generation.")
+    parser.add_argument("--use-anthropic", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--model", default=os.environ.get("KCXDOC_ANTHROPIC_MODEL", DEFAULT_MODEL), help="Anthropic model ID. Defaults to claude-sonnet-4-6.")
-    parser.add_argument("--max-tokens", type=int, default=8000, help="Maximum output tokens for Anthropic generation.")
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=int(os.environ.get("KCXDOC_ANTHROPIC_MAX_TOKENS", "16000")),
+        help="Maximum output tokens for Anthropic generation.",
+    )
     parser.add_argument("--temperature", type=float, default=0.2, help="Generation temperature for Anthropic generation.")
     parser.add_argument("--prompt-version", default=os.environ.get("KCXDOC_PROMPT_VERSION", DEFAULT_PROMPT_VERSION), help="Prompt version recorded in output metadata.")
     return parser.parse_args()
-
-
-def generate_deterministic_draft(trace: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
-    recording = trace.get("recording", {})
-    app = recording.get("targetApplication") or "Application"
-    segments = trace.get("segments", [])
-    review_flags = build_review_flags(segments)
-
-    return {
-        "schemaVersion": 1,
-        "sessionId": trace.get("sessionId", ""),
-        "title": f"{app} User Guide",
-        "audience": "Application users",
-        "purpose": "Provide a reviewed procedure guide generated from a compact local procedure trace.",
-        "status": "Prototype",
-        "owner": "KCXDocumentor",
-        "sourceRecording": {
-            "sourceFile": recording.get("sourceFile", "Not specified"),
-            "durationSeconds": recording.get("durationSeconds", 0),
-            "targetApplication": app,
-        },
-        "model": {
-            "provider": "local-deterministic",
-            "model": "none",
-            "mode": "no-ai-fallback",
-            "promptVersion": args.prompt_version,
-        },
-        "sections": [
-            {
-                "title": "Purpose",
-                "body": ["Use this draft as a reviewable starting point before publishing customer-facing documentation."],
-            },
-            {
-                "title": "Workflow Overview",
-                "body": ["Follow the extracted procedure steps in sequence and resolve any review flags before publishing."],
-            },
-        ],
-        "steps": [draft_step_from_segment(segment, index + 1) for index, segment in enumerate(segments)],
-        "reviewFlags": review_flags,
-    }
-
-
-def draft_step_from_segment(segment: dict[str, Any], index: int) -> dict[str, Any]:
-    confidence = segment.get("confidence", {})
-    image = first_candidate_image(segment)
-    ui_terms = segment.get("visibleUiText") or []
-    return {
-        "title": f"Review procedure segment {index}",
-        "instruction": normalize_instruction(segment.get("speakerText", "")),
-        "expectedResult": "The documented screen or workflow state is visible and ready for the next step.",
-        "uiTerms": ui_terms,
-        "confidence": confidence.get("overall", 0.0),
-        "needsHumanReview": confidence.get("needsHumanReview", True),
-        "screenshot": image.get("path") or "",
-        "selectedScreenshot": build_screenshot_reference(image, segment),
-        "caption": f"Candidate screenshot at {image.get('timestamp', segment.get('start', 'unknown time'))}",
-        "sourceSegmentId": segment.get("id"),
-    }
-
-
-def normalize_instruction(text: str) -> str:
-    text = " ".join(str(text).split())
-    if not text:
-        return "Review the source segment and write the missing user action."
-    text = text.replace("I click", "Click").replace("I select", "Select").replace("I open", "Open")
-    text = text.replace("we click", "Click").replace("we select", "Select").replace("we open", "Open")
-    return text[0].upper() + text[1:]
-
-
-def first_candidate_image(segment: dict[str, Any]) -> dict[str, Any]:
-    images = segment.get("candidateImages") or []
-    usable = [image for image in images if isinstance(image, dict) and image.get("reviewStatus") != "rejected"]
-    approved = [image for image in usable if image.get("reviewStatus") == "approved"]
-    if approved:
-        return sorted(approved, key=lambda item: -float(item.get("score") or 0))[0]
-    if usable:
-        return sorted(usable, key=lambda item: -float(item.get("score") or 0))[0]
-    return {}
 
 
 def apply_frame_review(trace: dict[str, Any], trace_path: Path) -> dict[str, Any]:
@@ -380,32 +323,17 @@ def as_string_list(value: Any) -> list[str]:
     return [text] if text else []
 
 
-def build_review_flags(segments: list[dict[str, Any]]) -> list[dict[str, str]]:
-    flags = []
-    for segment in segments:
-        confidence = segment.get("confidence") or {}
-        if confidence.get("needsHumanReview"):
-            flags.append(
-                {
-                    "severity": "review",
-                    "segmentId": segment.get("id", ""),
-                    "message": "; ".join(confidence.get("reasons") or ["Segment confidence requires human review."]),
-                }
-            )
-    return flags
-
-
 def generate_with_anthropic(trace: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        raise SystemExit("ANTHROPIC_API_KEY is required when --use-anthropic is set.")
+        raise SystemExit("ANTHROPIC_API_KEY is required to generate a guide draft.")
 
     system_prompt = (WORKSPACE / "prompts" / "guide_draft_system.md").read_text(encoding="utf-8")
     user_prompt = {
         "task": "Create KCXDocumentor guide draft JSON from this procedure trace.",
         "promptVersion": args.prompt_version,
         "today": date.today().isoformat(),
-        "procedureTrace": trace,
+        "procedureTrace": prepare_trace_for_anthropic(trace),
     }
     payload = {
         "model": args.model,
@@ -432,12 +360,25 @@ def generate_with_anthropic(trace: dict[str, Any], args: argparse.Namespace) -> 
         raise SystemExit(f"Anthropic API request failed: HTTP {exc.code}: {detail}") from exc
 
     text = extract_text_response(result)
-    draft = json.loads(text)
+    try:
+        draft = json.loads(text)
+    except json.JSONDecodeError as exc:
+        report = generation_failure_report(
+            trace=trace,
+            args=args,
+            result=result,
+            error_message=f"Anthropic returned invalid guide JSON: {exc}",
+            response_chars=len(text),
+        )
+        upsert_usage_record(report)
+        raise AnthropicDraftError(report["errorMessage"], report) from exc
     if isinstance(draft, dict) and isinstance(draft.get("guideDraft"), dict):
         wrapper_model = draft.get("model") if isinstance(draft.get("model"), dict) else {}
         draft = draft["guideDraft"]
         draft.setdefault("model", {}).update(wrapper_model)
     draft.setdefault("model", {})
+    draft.setdefault("sessionId", trace.get("sessionId", ""))
+    draft.setdefault("generatedAt", utc_timestamp())
     draft["model"].update(
         {
             "provider": "anthropic",
@@ -446,7 +387,268 @@ def generate_with_anthropic(trace: dict[str, Any], args: argparse.Namespace) -> 
             "promptVersion": args.prompt_version,
         }
     )
+    draft["usage"] = normalize_anthropic_usage(result.get("usage"), args.model)
     return draft
+
+
+def utc_timestamp() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def normalize_anthropic_usage(usage: Any, model: str) -> dict[str, Any]:
+    raw_usage = usage if isinstance(usage, dict) else {}
+    input_tokens = int(raw_usage.get("input_tokens") or 0)
+    output_tokens = int(raw_usage.get("output_tokens") or 0)
+    total_tokens = input_tokens + output_tokens
+    return {
+        "inputTokens": input_tokens,
+        "outputTokens": output_tokens,
+        "totalTokens": total_tokens,
+        "estimatedCostUSD": estimate_anthropic_cost_usd(input_tokens, output_tokens, model),
+    }
+
+
+def estimate_anthropic_cost_usd(input_tokens: int, output_tokens: int, model: str) -> float:
+    # Pricing captured with each artifact so historical runs remain auditable.
+    return round(
+        (input_tokens / 1_000_000 * SONNET_4_6_INPUT_COST_PER_MILLION)
+        + (output_tokens / 1_000_000 * SONNET_4_6_OUTPUT_COST_PER_MILLION),
+        6,
+    )
+
+
+def generation_report_from_draft(draft: dict[str, Any]) -> dict[str, Any]:
+    model = draft.get("model") if isinstance(draft.get("model"), dict) else {}
+    report = {
+        "schemaVersion": 1,
+        "status": "succeeded",
+        "generatedAt": draft.get("generatedAt", ""),
+        "sessionId": draft.get("sessionId", ""),
+        "title": draft_title(draft),
+        "model": model.get("model", ""),
+        "provider": model.get("provider", ""),
+        "promptVersion": model.get("promptVersion", ""),
+        "usage": draft.get("usage", {}),
+    }
+    report["generationRunId"] = generation_run_id(report)
+    return report
+
+
+def generation_failure_report(
+    trace: dict[str, Any],
+    args: argparse.Namespace,
+    result: dict[str, Any],
+    error_message: str,
+    response_chars: int = 0,
+) -> dict[str, Any]:
+    report = {
+        "schemaVersion": 1,
+        "status": "failed",
+        "generatedAt": utc_timestamp(),
+        "sessionId": trace.get("sessionId", ""),
+        "title": "Failed guide generation",
+        "model": args.model,
+        "provider": "anthropic",
+        "promptVersion": args.prompt_version,
+        "usage": normalize_anthropic_usage(result.get("usage"), args.model),
+        "errorMessage": error_message,
+        "responseChars": response_chars,
+    }
+    report["generationRunId"] = generation_run_id(report)
+    return report
+
+
+def generation_run_id(report: dict[str, Any]) -> str:
+    usage = report.get("usage") if isinstance(report.get("usage"), dict) else {}
+    fingerprint = "|".join(
+        str(value)
+        for value in (
+            report.get("sessionId", ""),
+            report.get("generatedAt", ""),
+            report.get("model", ""),
+            report.get("promptVersion", ""),
+            usage.get("inputTokens", usage.get("input_tokens", "")),
+            usage.get("outputTokens", usage.get("output_tokens", "")),
+        )
+    )
+    return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:16]
+
+
+def draft_title(draft: dict[str, Any]) -> str:
+    if str(draft.get("title") or "").strip():
+        return str(draft["title"]).strip()
+    document = draft.get("document") if isinstance(draft.get("document"), dict) else {}
+    return str(document.get("title") or "").strip()
+
+
+def write_generation_report(draft_path: Path, draft: dict[str, Any]) -> Path:
+    report_path = draft_path.parent / "generation_report.json"
+    report = generation_report_from_draft(draft)
+    report_path.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    upsert_usage_record(report)
+    return report_path
+
+
+def write_generation_failure(draft_path: Path, report: dict[str, Any]) -> Path:
+    failure_path = draft_path.parent / "generation_failure.json"
+    failure_path.parent.mkdir(parents=True, exist_ok=True)
+    failure_path.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return failure_path
+
+
+def upsert_usage_record(report: dict[str, Any], db_path: Path | None = None) -> Path:
+    db_path = db_path or USAGE_DB_PATH
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    run_id = str(report.get("generationRunId") or generation_run_id(report))
+    usage = report.get("usage") if isinstance(report.get("usage"), dict) else {}
+    status = str(report.get("status") or "succeeded")
+    with sqlite3.connect(db_path) as connection:
+        ensure_usage_schema(connection)
+        connection.execute(
+            """
+            INSERT INTO generation_usage (
+                generation_run_id, generated_at, recorded_at, session_id, title,
+                provider, model, prompt_version, input_tokens, output_tokens,
+                total_tokens, estimated_cost_usd, status, error_message, report_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(generation_run_id) DO UPDATE SET
+                generated_at = excluded.generated_at,
+                recorded_at = excluded.recorded_at,
+                session_id = excluded.session_id,
+                title = excluded.title,
+                provider = excluded.provider,
+                model = excluded.model,
+                prompt_version = excluded.prompt_version,
+                input_tokens = excluded.input_tokens,
+                output_tokens = excluded.output_tokens,
+                total_tokens = excluded.total_tokens,
+                estimated_cost_usd = excluded.estimated_cost_usd,
+                status = excluded.status,
+                error_message = excluded.error_message,
+                report_json = excluded.report_json
+            """,
+            (
+                run_id,
+                report.get("generatedAt", ""),
+                utc_timestamp(),
+                report.get("sessionId", ""),
+                report.get("title", ""),
+                report.get("provider", ""),
+                report.get("model", ""),
+                report.get("promptVersion", ""),
+                int(usage.get("inputTokens") or usage.get("input_tokens") or 0),
+                int(usage.get("outputTokens") or usage.get("output_tokens") or 0),
+                int(usage.get("totalTokens") or usage.get("total_tokens") or 0),
+                float(usage.get("estimatedCostUSD") or usage.get("estimated_cost_usd") or 0),
+                status,
+                str(report.get("errorMessage") or ""),
+                json.dumps(report, sort_keys=True),
+            ),
+        )
+    return db_path
+
+
+def ensure_usage_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS generation_usage (
+            generation_run_id TEXT PRIMARY KEY,
+            generated_at TEXT NOT NULL,
+            recorded_at TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            estimated_cost_usd REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'succeeded',
+            error_message TEXT NOT NULL DEFAULT '',
+            report_json TEXT NOT NULL
+        )
+        """
+    )
+    existing_columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(generation_usage)").fetchall()
+    }
+    if "status" not in existing_columns:
+        connection.execute("ALTER TABLE generation_usage ADD COLUMN status TEXT NOT NULL DEFAULT 'succeeded'")
+    if "error_message" not in existing_columns:
+        connection.execute("ALTER TABLE generation_usage ADD COLUMN error_message TEXT NOT NULL DEFAULT ''")
+
+
+def prepare_trace_for_anthropic(trace: dict[str, Any]) -> dict[str, Any]:
+    prepared = json.loads(json.dumps(trace))
+    excluded_frames: list[dict[str, Any]] = []
+    review_guidance = normalize_review_guidance(prepared.get("reviewGuidance"))
+    segments = prepared.get("segments") if isinstance(prepared.get("segments"), list) else []
+
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        images = segment.get("candidateImages") if isinstance(segment.get("candidateImages"), list) else []
+        kept_images = []
+        for image in images:
+            if not isinstance(image, dict):
+                continue
+            if str(image.get("reviewStatus", "")).lower() == "rejected":
+                excluded = excluded_frame_context(image, segment)
+                excluded_frames.append(excluded)
+                note = str(image.get("reviewNote") or "").strip()
+                if note:
+                    review_guidance.append(
+                        {
+                            "type": "excluded-frame",
+                            "frameId": excluded.get("frameId", ""),
+                            "sourceSegmentId": excluded.get("sourceSegmentId", ""),
+                            "message": note,
+                        }
+                    )
+                continue
+            kept_images.append(image)
+        segment["candidateImages"] = kept_images
+
+    if excluded_frames:
+        prepared["excludedFrames"] = merge_excluded_frames(prepared.get("excludedFrames"), excluded_frames)
+    if review_guidance:
+        prepared["reviewGuidance"] = review_guidance
+    return prepared
+
+
+def normalize_review_guidance(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return list(value)
+    if value:
+        return [value]
+    return []
+
+
+def excluded_frame_context(image: dict[str, Any], segment: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "frameId": image.get("frameId", ""),
+        "sourceSegmentId": segment.get("id", ""),
+        "timestamp": image.get("timestamp", ""),
+        "timestampSeconds": image.get("timestampSeconds", 0),
+        "reviewStatus": image.get("reviewStatus", "rejected"),
+        "reviewNote": image.get("reviewNote", ""),
+        "reason": image.get("reason", ""),
+    }
+
+
+def merge_excluded_frames(existing: Any, rejected_frames: list[dict[str, Any]]) -> list[Any]:
+    merged = list(existing) if isinstance(existing, list) else []
+    merged.extend(rejected_frames)
+    return merged
 
 
 def extract_text_response(result: dict[str, Any]) -> str:

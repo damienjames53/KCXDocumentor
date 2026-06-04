@@ -10,21 +10,35 @@
     <header class="app-header">
       <div>
         <h1>KCXDocumentor</h1>
-        <p>Local video-to-guide testing console</p>
+        <p>Recording review and guide build console</p>
       </div>
+      <nav class="main-nav" aria-label="Main navigation">
+        <button class="main-nav-button active" type="button" data-page="workspace">Workspace</button>
+        <button class="main-nav-button" type="button" data-page="usage">AI Spend</button>
+      </nav>
       <div class="status-strip" aria-live="polite">
-        <span id="apiStatus" class="status-pill neutral">API not checked</span>
-        <span id="toolStatus" class="status-pill neutral">Tools not checked</span>
+        <button id="globalUsageButton" class="usage-status-button" type="button" title="Open AI spend reporting">
+          <span>Current Month Spend</span>
+          <strong id="globalUsageMetric">--</strong>
+        </button>
         <button id="refreshAll" class="icon-button" type="button" title="Refresh recordings and sessions">Refresh</button>
       </div>
     </header>
 
-    <main class="workspace">
+    <main id="workspacePage" class="workspace app-page active">
       <section class="panel pipeline-panel" aria-labelledby="pipelineTitle">
         <div class="panel-heading">
-          <h2 id="pipelineTitle">Pipeline</h2>
+          <h2 id="pipelineTitle">Prepare Recording</h2>
           <span id="selectedSessionPill" class="status-pill neutral">No session selected</span>
         </div>
+
+        <ol class="workflow-steps" aria-label="Guide creation workflow">
+          <li><span class="workflow-number" aria-hidden="true">1</span><div><strong>Import</strong><small>Select the recording and optional transcript.</small></div></li>
+          <li><span class="workflow-number" aria-hidden="true">2</span><div><strong>Process Recording</strong><small>Create the local trace and frame candidates.</small></div></li>
+          <li><span class="workflow-number" aria-hidden="true">3</span><div><strong>Review Frames</strong><small>Approve, reject, or add screenshots.</small></div></li>
+          <li><span class="workflow-number" aria-hidden="true">4</span><div><strong>Create Guide</strong><small>Generate guide content and prepare the DOCX.</small></div></li>
+          <li><span class="workflow-number" aria-hidden="true">5</span><div><strong>Download DOCX</strong><small>Use QA status as a secondary readiness check.</small></div></li>
+        </ol>
 
         <form id="pipelineForm" class="stack">
           <div class="import-grid" aria-label="Recording and transcript import">
@@ -53,6 +67,7 @@
             <select id="transcriptSelect" name="transcript">
               <option value="">No transcript selected</option>
             </select>
+            <small class="field-help">Use the Teams transcript when available. If blank, the app falls back to local Whisper during processing.</small>
           </label>
 
           <label>
@@ -89,12 +104,23 @@
             </label>
           </div>
 
-          <div class="button-row">
-            <button id="processButton" type="submit">Process Recording</button>
-            <button id="deterministicDraftButton" type="button">Deterministic Draft</button>
-            <button id="anthropicDraftButton" type="button">Anthropic Draft</button>
-            <button id="buildDocxButton" type="button">Build DOCX</button>
-            <button id="qaDocxButton" type="button">Run QA</button>
+          <div class="action-dock">
+            <div class="button-row guide-action-row" aria-label="Primary guide actions">
+              <button id="processButton" type="submit">Process Recording</button>
+              <button id="generateDraftButton" type="button">Create Guide</button>
+              <button id="buildDocxButton" type="button">Download DOCX</button>
+            </div>
+            <div class="qa-action-surface" aria-label="Guide QA status">
+              <div>
+                <strong id="qaStatusTitle">QA Status</strong>
+                <span id="qaStatusText">Run QA again after guide or screenshot changes. Downloads remain in Generated Files.</span>
+              </div>
+              <button id="qaDocxButton" class="secondary" type="button">Re-run QA</button>
+            </div>
+            <div id="operationStatus" class="operation-status ai-progress-banner" hidden>
+              <span class="operation-spinner" aria-hidden="true"></span>
+              <span id="operationStatusText">Processing...</span>
+            </div>
           </div>
         </form>
 
@@ -118,8 +144,11 @@
 
       <section class="panel session-panel" aria-labelledby="sessionTitle">
         <div class="panel-heading">
-          <h2 id="sessionTitle">Session Review</h2>
-          <button id="reloadSession" class="secondary" type="button">Reload Session</button>
+          <h2 id="sessionTitle">Review Session</h2>
+          <div class="heading-actions">
+            <button id="reloadSession" class="secondary" type="button">Reload Session</button>
+            <button id="clearSession" class="secondary danger" type="button">Delete Session</button>
+          </div>
         </div>
 
         <div id="summaryCards" class="summary-grid">
@@ -156,27 +185,70 @@
           <div class="frame-review-toolbar" aria-label="Frame review tools">
             <div>
               <strong>Frame Review</strong>
-              <span id="frameReviewStatus" class="muted">Load a processed session to curate screenshots.</span>
+              <span id="frameReviewStatus" class="muted">Load a processed session to curate screenshots. Rejected frames are excluded from guide candidates; their notes remain reviewer guidance.</span>
             </div>
             <form id="addFrameForm" class="add-frame-form">
-              <label>
-                <span>Timestamp</span>
-                <input id="addFrameTimestamp" name="timestamp" autocomplete="off" placeholder="mm:ss or seconds">
-              </label>
               <label>
                 <span>Assign to</span>
                 <select id="addFrameSegment" name="segmentId">
                   <option value="">No segment</option>
                 </select>
               </label>
-              <button id="addFrameButton" class="secondary" type="submit">Add Candidate</button>
+              <button id="addFrameButton" type="button">Add from Video</button>
+              <details class="manual-frame-entry">
+                <summary>Use timestamp instead</summary>
+                <div>
+                  <label>
+                    <span>Timestamp</span>
+                    <input id="addFrameTimestamp" name="timestamp" autocomplete="off" placeholder="mm:ss or seconds">
+                  </label>
+                  <button id="addFrameTimestampButton" class="secondary" type="submit">Add Timestamp</button>
+                </div>
+              </details>
             </form>
+          </div>
+          <div id="frameCapturePicker" class="frame-capture-picker" hidden>
+            <div class="frame-capture-header">
+              <div>
+                <strong>Capture from recording</strong>
+                <span id="frameCaptureStatus" class="muted">Use the video controls to choose a frame time.</span>
+              </div>
+              <button id="closeFrameCapture" class="secondary" type="button" aria-label="Close frame capture picker">Close</button>
+            </div>
+            <video id="sessionVideo" class="session-video" controls preload="metadata" aria-label="Selected session source recording">
+              Your browser does not support the video element.
+            </video>
+            <div class="frame-capture-actions">
+              <span id="sessionVideoTime" class="status-pill neutral" aria-live="polite">Current time 0:00.000</span>
+              <button id="useVideoTimeButton" type="button">Use Current Time</button>
+            </div>
           </div>
           <div id="frameGrid" class="frame-grid empty-state">Candidate frames will appear after processing.</div>
         </div>
 
+        <div id="frameInspectModal" class="modal-backdrop" hidden>
+          <div class="frame-inspect-modal" role="dialog" aria-modal="true" aria-labelledby="frameInspectTitle">
+            <header>
+              <div>
+                <h3 id="frameInspectTitle">Frame Preview</h3>
+                <span id="frameInspectMeta" class="muted">No frame selected.</span>
+              </div>
+              <button id="closeFrameInspect" class="secondary" type="button" aria-label="Close frame preview">Close</button>
+            </header>
+            <div class="frame-inspect-stage">
+              <img id="frameInspectImage" alt="">
+            </div>
+            <div id="frameInspectDetails" class="frame-inspect-details"></div>
+          </div>
+        </div>
+
         <div id="artifactsTab" class="tab-panel">
-          <div id="artifactList" class="artifact-list empty-state">Generated draft, DOCX, and QA artifacts will appear here.</div>
+          <div class="artifact-toolbar">
+            <strong>Generated Files</strong>
+            <span class="muted">Download the DOCX after Create Guide succeeds. Use QA as a secondary status check before sharing outside the demo team.</span>
+          </div>
+          <div id="generationMetadata" class="generation-metadata empty-state">Guide creation usage will appear after the AI draft is available.</div>
+          <div id="artifactList" class="artifact-list empty-state">Guide draft, DOCX, and QA status artifacts will appear here.</div>
         </div>
 
         <div id="jsonTab" class="tab-panel">
@@ -199,6 +271,44 @@
           <ol id="activityLog" class="activity-log" aria-live="polite"></ol>
         </div>
       </aside>
+    </main>
+
+    <main id="usagePage" class="usage-page app-page" hidden>
+      <section class="panel usage-report-panel" aria-labelledby="usagePageTitle">
+        <div class="usage-toolbar">
+          <div>
+            <h2 id="usagePageTitle">AI Spend</h2>
+            <span id="usageStatus" class="muted">Token usage totals load from the local API.</span>
+          </div>
+          <div class="usage-range" role="group" aria-label="Usage range">
+            <button class="secondary" type="button" data-usage-range="day">Day</button>
+            <button class="secondary" type="button" data-usage-range="week">Week</button>
+            <button class="secondary active" type="button" data-usage-range="month">Month</button>
+            <button class="secondary" type="button" data-usage-range="year">Year</button>
+          </div>
+        </div>
+
+        <div id="usageSummary" class="usage-summary summary-grid">
+          <article>
+            <span class="metric-label">Documents</span>
+            <strong id="usageDocumentMetric">--</strong>
+          </article>
+          <article>
+            <span class="metric-label">Total Tokens</span>
+            <strong id="usageTokenMetric">--</strong>
+          </article>
+          <article>
+            <span class="metric-label">Input / Output</span>
+            <strong id="usageInOutMetric">--</strong>
+          </article>
+          <article>
+            <span class="metric-label">Estimated Cost</span>
+            <strong id="usageCostMetric">--</strong>
+          </article>
+        </div>
+
+        <div id="usageBreakdown" class="usage-breakdown empty-state">Select a range to load usage totals.</div>
+      </section>
     </main>
 
     <template id="activityTemplate">

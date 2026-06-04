@@ -10,6 +10,7 @@ import mimetypes
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 from http import HTTPStatus
@@ -24,6 +25,7 @@ WEB_ROOT = WORKSPACE / "web"
 RAW_ROOT = WORKSPACE / "samples" / "raw"
 PROCESSED_ROOT = WORKSPACE / "samples" / "processed"
 GENERATED_ROOT = WORKSPACE / "artifacts" / "generated"
+USAGE_DB_PATH = WORKSPACE / "artifacts" / "usage" / "generation_usage.sqlite3"
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 FRAME_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,96}$")
 SEGMENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,96}$")
@@ -77,6 +79,10 @@ class KCXDocumentorHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/health":
                 self.send_json(get_health())
                 return
+            if parsed.path == "/api/usage-summary":
+                params = parse_qs(parsed.query)
+                self.send_json(read_usage_summary(first_query_value(params, "range") or "day"))
+                return
             if parsed.path == "/api/session":
                 params = parse_qs(parsed.query)
                 session_id = first_query_value(params, "sessionId")
@@ -86,6 +92,11 @@ class KCXDocumentorHandler(BaseHTTPRequestHandler):
                     self.serve_session_asset(session_dir, asset)
                     return
                 self.send_json({"session": read_session(session_dir)})
+                return
+            if parsed.path == "/api/session-video":
+                params = parse_qs(parsed.query)
+                session_dir = require_session_dir(first_query_value(params, "sessionId"))
+                self.serve_session_video(session_dir)
                 return
             if parsed.path == "/api/frame-review":
                 params = parse_qs(parsed.query)
@@ -110,6 +121,9 @@ class KCXDocumentorHandler(BaseHTTPRequestHandler):
             body = self.read_json_body()
             if parsed.path == "/api/process":
                 self.send_json(process_recording(body))
+                return
+            if parsed.path == "/api/delete-session":
+                self.send_json(delete_session_artifacts(body))
                 return
             if parsed.path == "/api/frame-review":
                 self.send_json(update_frame_review(body))
@@ -172,6 +186,11 @@ class KCXDocumentorHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def serve_session_video(self, session_dir: Path) -> None:
+        manifest = read_json_if_exists(session_dir / "manifest.json")
+        source = session_source_path(manifest)
+        self.serve_file(source, inline_name=source.name)
+
     def serve_session_asset(self, session_dir: Path, raw_asset: str) -> None:
         candidate = safe_join(session_dir, raw_asset)
         if not candidate.is_file():
@@ -180,12 +199,37 @@ class KCXDocumentorHandler(BaseHTTPRequestHandler):
         if not candidate.is_file():
             raise HttpError(HTTPStatus.NOT_FOUND, "Session asset not found.")
 
+        self.serve_file(candidate, inline_name=candidate.name)
+
+    def serve_file(self, candidate: Path, inline_name: str = "") -> None:
         content_type = mimetypes.guess_type(str(candidate))[0] or "application/octet-stream"
+        file_size = candidate.stat().st_size
+        range_header = self.headers.get("Range", "")
+        if range_header:
+            start, end = parse_byte_range(range_header, file_size)
+            length = end - start + 1
+            self.send_response(HTTPStatus.PARTIAL_CONTENT)
+            self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+            self.send_header("Content-Length", str(length))
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-store")
+            if inline_name:
+                self.send_header("Content-Disposition", f'inline; filename="{inline_name}"')
+            self.end_headers()
+            with candidate.open("rb") as handle:
+                handle.seek(start)
+                self.wfile.write(handle.read(length))
+            return
+
         data = candidate.read_bytes()
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Accept-Ranges", "bytes")
         self.send_header("Cache-Control", "no-store")
+        if inline_name:
+            self.send_header("Content-Disposition", f'inline; filename="{inline_name}"')
         self.end_headers()
         self.wfile.write(data)
 
@@ -300,13 +344,14 @@ def process_recording(body: dict[str, Any]) -> dict[str, Any]:
 
 def generate_draft(body: dict[str, Any]) -> dict[str, Any]:
     session_dir = require_session_dir(body.get("sessionId"))
-    use_anthropic = bool(body.get("useAnthropic", False))
     trace_path = session_dir / "procedure_trace.json"
     if not trace_path.exists():
         raise HttpError(HTTPStatus.NOT_FOUND, "Session does not contain procedure_trace.json.")
 
-    mode = "anthropic" if use_anthropic else "deterministic"
-    output = GENERATED_ROOT / session_dir.name / f"guide_draft.{mode}.json"
+    output = GENERATED_ROOT / session_dir.name / "guide_draft.anthropic.json"
+    failure_path = output.parent / "generation_failure.json"
+    if failure_path.exists():
+        failure_path.unlink()
     command = [
         sys.executable,
         str(WORKSPACE / "scripts" / "generate_guide_draft.py"),
@@ -314,27 +359,24 @@ def generate_draft(body: dict[str, Any]) -> dict[str, Any]:
         "--output",
         str(output),
     ]
-    if use_anthropic:
-        command.append("--use-anthropic")
 
     result = run_command(command)
     response = {"command": command_summary(command), "draft": relative_to_workspace(output), "result": result}
     if output.exists():
         response["draftSummary"] = read_json_summary(output)
+    failure_summary = read_json_if_exists(failure_path) if result["returnCode"] != 0 else {}
+    if failure_summary:
+        response["failureSummary"] = failure_summary
     return response
 
 
 def build_docx(body: dict[str, Any]) -> dict[str, Any]:
     session_dir = require_session_dir(body.get("sessionId"))
-    draft = string_value(body.get("draft"), "deterministic")
-    if draft not in {"deterministic", "anthropic"}:
-        raise HttpError(HTTPStatus.BAD_REQUEST, "draft must be 'deterministic' or 'anthropic'.")
-
-    draft_path = GENERATED_ROOT / session_dir.name / f"guide_draft.{draft}.json"
+    draft_path = GENERATED_ROOT / session_dir.name / "guide_draft.anthropic.json"
     if not draft_path.exists():
         raise HttpError(HTTPStatus.NOT_FOUND, f"Draft not found: {relative_to_workspace(draft_path)}")
 
-    output = GENERATED_ROOT / session_dir.name / f"user_guide.{draft}.docx"
+    output = GENERATED_ROOT / session_dir.name / "user_guide.anthropic.docx"
     command = [
         sys.executable,
         str(WORKSPACE / "scripts" / "build_guide_docx.py"),
@@ -351,12 +393,8 @@ def build_docx(body: dict[str, Any]) -> dict[str, Any]:
 
 def qa_docx(body: dict[str, Any]) -> dict[str, Any]:
     session_dir = require_session_dir(body.get("sessionId"))
-    draft = string_value(body.get("draft"), "deterministic")
     strict = bool(body.get("strict", False))
-    if draft not in {"deterministic", "anthropic"}:
-        raise HttpError(HTTPStatus.BAD_REQUEST, "draft must be 'deterministic' or 'anthropic'.")
-
-    docx_path = GENERATED_ROOT / session_dir.name / f"user_guide.{draft}.docx"
+    docx_path = GENERATED_ROOT / session_dir.name / "user_guide.anthropic.docx"
     if not docx_path.exists():
         raise HttpError(HTTPStatus.NOT_FOUND, f"DOCX not found: {relative_to_workspace(docx_path)}")
 
@@ -385,6 +423,27 @@ def qa_docx(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def delete_session_artifacts(body: dict[str, Any]) -> dict[str, Any]:
+    session_id = require_session_id(body.get("sessionId"))
+    session_dir = require_child_dir(PROCESSED_ROOT, session_id, "processed session")
+    generated_dir = optional_child_dir(GENERATED_ROOT, session_id, "generated artifacts")
+    if not session_dir.is_dir():
+        raise HttpError(HTTPStatus.NOT_FOUND, "Session not found in samples/processed.")
+
+    deleted: list[str] = []
+    shutil.rmtree(session_dir)
+    deleted.append(relative_to_workspace(session_dir))
+    if generated_dir and generated_dir.exists():
+        shutil.rmtree(generated_dir)
+        deleted.append(relative_to_workspace(generated_dir))
+
+    return {
+        "sessionId": session_id,
+        "deleted": deleted,
+        "sessions": list_sessions(),
+    }
+
+
 def read_session(session_dir: Path) -> dict[str, Any]:
     summary = summarize_session(session_dir)
     files = {}
@@ -399,6 +458,9 @@ def read_session(session_dir: Path) -> dict[str, Any]:
     summary["frameReview"] = read_frame_review_view(session_dir)
     generated_dir = GENERATED_ROOT / session_dir.name
     summary["generated"] = list_generated_files(generated_dir)
+    generation = read_generation_summary(generated_dir)
+    if generation:
+        summary["generation"] = generation
     return summary
 
 
@@ -406,20 +468,321 @@ def summarize_session(session_dir: Path) -> dict[str, Any]:
     manifest = read_json_if_exists(session_dir / "manifest.json")
     trace = read_json_if_exists(session_dir / "procedure_trace.json")
     recording = trace.get("recording", {}) if isinstance(trace.get("recording"), dict) else {}
+    source_file = string_value(recording.get("sourceFile") or manifest.get("sourceFile"), "")
+    source_name = string_value(recording.get("sourceName") or Path(source_file).name, "")
     stat = session_dir.stat()
+    generated_dir = GENERATED_ROOT / session_dir.name
+    generated = list_generated_files(generated_dir)
+    generated_mtime = latest_file_mtime(generated_dir)
+    modified_timestamp = max(stat.st_mtime, generated_mtime or 0)
     review = read_frame_review(session_dir)
     review_summary = summarize_frame_review(review, merge_frame_review(session_dir, review))
+    generation = read_generation_summary(generated_dir)
     return {
         "sessionId": session_dir.name,
         "relativePath": relative_to_workspace(session_dir),
         "createdUtc": manifest.get("createdUtc") or utc_from_timestamp(stat.st_ctime),
-        "modifiedUtc": utc_from_timestamp(stat.st_mtime),
+        "modifiedUtc": utc_from_timestamp(modified_timestamp),
         "targetApplication": recording.get("targetApplication") or "Unknown Application",
+        "sourceFile": source_file,
+        "sourceName": source_name,
         "durationSeconds": recording.get("durationSeconds"),
         "segmentCount": len(trace.get("segments", [])) if isinstance(trace.get("segments"), list) else None,
         "frameReview": review_summary,
-        "generated": list_generated_files(GENERATED_ROOT / session_dir.name),
+        "generated": generated,
+        **({"generation": generation} if generation else {}),
     }
+
+
+def read_generation_summary(generated_dir: Path) -> dict[str, Any]:
+    for name in ("generation_report.json", "generation_failure.json", "guide_draft.anthropic.json"):
+        data = read_json_if_exists(generated_dir / name)
+        summary = generation_summary_from_json(data)
+        if summary:
+            return summary
+    return {}
+
+
+def read_usage_summary(range_name: str = "day") -> dict[str, Any]:
+    normalized_range = range_name if range_name in {"day", "week", "month", "year"} else "day"
+    reports = collect_generation_reports()
+    buckets: dict[str, dict[str, Any]] = {}
+    for report in reports:
+        bucket_key = usage_bucket_key(report.get("generatedAt", ""), normalized_range)
+        bucket = buckets.setdefault(bucket_key, empty_usage_bucket(bucket_key))
+        add_usage_to_bucket(bucket, report)
+
+    ordered_buckets = [buckets[key] for key in sorted(buckets)]
+    totals = empty_usage_totals()
+    for bucket in ordered_buckets:
+        add_totals(totals, bucket["totals"])
+
+    return {
+        "range": normalized_range,
+        "generatedAt": utc_now(),
+        "totals": totals,
+        "buckets": ordered_buckets,
+        "days": ordered_buckets if normalized_range == "day" else [],
+    }
+
+
+def collect_generation_reports() -> list[dict[str, Any]]:
+    reports_by_id: dict[str, dict[str, Any]] = {}
+    for report in read_usage_db_records():
+        reports_by_id[report["generationRunId"]] = report
+
+    if not GENERATED_ROOT.exists() or not GENERATED_ROOT.is_dir():
+        return list(reports_by_id.values())
+    for session_dir in sorted(GENERATED_ROOT.iterdir(), key=lambda item: item.name.lower()):
+        if not session_dir.is_dir() or session_dir.name.startswith("."):
+            continue
+        data = read_json_if_exists(session_dir / "generation_report.json")
+        if not data:
+            data = read_json_if_exists(session_dir / "generation_failure.json")
+        if not data:
+            data = read_json_if_exists(session_dir / "guide_draft.anthropic.json")
+        report = generation_report_record_from_json(data, session_dir.name)
+        if report:
+            reports_by_id.setdefault(report["generationRunId"], report)
+    return list(reports_by_id.values())
+
+
+def read_usage_db_records(db_path: Path | None = None) -> list[dict[str, Any]]:
+    db_path = db_path or USAGE_DB_PATH
+    if not db_path.exists() or not db_path.is_file():
+        return []
+    try:
+        with sqlite3.connect(db_path) as connection:
+            ensure_usage_schema(connection)
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT generation_run_id, generated_at, session_id, title, provider,
+                       model, prompt_version, input_tokens, output_tokens, total_tokens,
+                       estimated_cost_usd, status, error_message
+                FROM generation_usage
+                ORDER BY generated_at, generation_run_id
+                """
+            ).fetchall()
+    except sqlite3.Error:
+        return []
+    return [
+        {
+            "generationRunId": row["generation_run_id"],
+            "generatedAt": row["generated_at"],
+            "sessionId": row["session_id"],
+            "title": row["title"],
+            "provider": row["provider"],
+            "model": row["model"],
+            "promptVersion": row["prompt_version"],
+            "inputTokens": row["input_tokens"],
+            "outputTokens": row["output_tokens"],
+            "totalTokens": row["total_tokens"],
+            "estimatedCostUSD": row["estimated_cost_usd"],
+            "status": row["status"],
+            "errorMessage": row["error_message"],
+        }
+        for row in rows
+    ]
+
+
+def ensure_usage_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS generation_usage (
+            generation_run_id TEXT PRIMARY KEY,
+            generated_at TEXT NOT NULL,
+            recorded_at TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            estimated_cost_usd REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'succeeded',
+            error_message TEXT NOT NULL DEFAULT '',
+            report_json TEXT NOT NULL
+        )
+        """
+    )
+    existing_columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(generation_usage)").fetchall()
+    }
+    if "status" not in existing_columns:
+        connection.execute("ALTER TABLE generation_usage ADD COLUMN status TEXT NOT NULL DEFAULT 'succeeded'")
+    if "error_message" not in existing_columns:
+        connection.execute("ALTER TABLE generation_usage ADD COLUMN error_message TEXT NOT NULL DEFAULT ''")
+
+
+def generation_report_record_from_json(data: dict[str, Any], fallback_session_id: str = "") -> dict[str, Any]:
+    summary = generation_summary_from_json(data)
+    if not summary:
+        return {}
+    record = {
+        **summary,
+        "sessionId": data.get("sessionId") or fallback_session_id,
+        "title": data.get("title") or nested_title(data),
+        "status": data.get("status") or summary.get("status") or "succeeded",
+        "errorMessage": data.get("errorMessage") or summary.get("errorMessage") or "",
+    }
+    record["generationRunId"] = data.get("generationRunId") or generation_run_id_from_record(record)
+    return record
+
+
+def generation_run_id_from_record(record: dict[str, Any]) -> str:
+    usage_values = (
+        record.get("inputTokens", ""),
+        record.get("outputTokens", ""),
+    )
+    fingerprint = "|".join(
+        str(value)
+        for value in (
+            record.get("sessionId", ""),
+            record.get("generatedAt", ""),
+            record.get("model", ""),
+            record.get("promptVersion", ""),
+            *usage_values,
+        )
+    )
+    return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:16]
+
+
+def nested_title(data: dict[str, Any]) -> str:
+    document = data.get("document") if isinstance(data.get("document"), dict) else {}
+    return str(document.get("title") or "")
+
+
+def usage_bucket_key(generated_at: str, range_name: str) -> str:
+    from datetime import datetime, timezone
+
+    try:
+        parsed = datetime.fromisoformat(str(generated_at).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        parsed = datetime.now(tz=timezone.utc)
+    if range_name == "week":
+        year, week, _ = parsed.isocalendar()
+        return f"{year}-W{week:02d}"
+    if range_name == "month":
+        return parsed.strftime("%Y-%m")
+    if range_name == "year":
+        return parsed.strftime("%Y")
+    return parsed.strftime("%Y-%m-%d")
+
+
+def empty_usage_bucket(label: str) -> dict[str, Any]:
+    return {"label": label, "totals": empty_usage_totals(), "documents": []}
+
+
+def empty_usage_totals() -> dict[str, Any]:
+    return {
+        "documents": 0,
+        "attempts": 0,
+        "failedAttempts": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "totalTokens": 0,
+        "estimatedCostUSD": 0.0,
+    }
+
+
+def add_usage_to_bucket(bucket: dict[str, Any], report: dict[str, Any]) -> None:
+    status = str(report.get("status") or "succeeded")
+    failed = status == "failed"
+    totals = {
+        "documents": 0 if failed else 1,
+        "attempts": 1,
+        "failedAttempts": 1 if failed else 0,
+        "inputTokens": report.get("inputTokens") or 0,
+        "outputTokens": report.get("outputTokens") or 0,
+        "totalTokens": report.get("totalTokens") or 0,
+        "estimatedCostUSD": report.get("estimatedCostUSD") or 0.0,
+    }
+    add_totals(bucket["totals"], totals)
+    bucket["documents"].append(
+        {
+            "sessionId": report.get("sessionId", ""),
+            "title": report.get("title", ""),
+            "model": report.get("model", ""),
+            "generatedAt": report.get("generatedAt", ""),
+            "status": status,
+            "errorMessage": report.get("errorMessage", ""),
+            "usage": {
+                "inputTokens": totals["inputTokens"],
+                "outputTokens": totals["outputTokens"],
+                "totalTokens": totals["totalTokens"],
+                "estimatedCostUSD": totals["estimatedCostUSD"],
+            },
+        }
+    )
+
+
+def add_totals(target: dict[str, Any], source: dict[str, Any]) -> None:
+    target["documents"] = int(target.get("documents") or 0) + int(source.get("documents") or 0)
+    target["attempts"] = int(target.get("attempts") or 0) + int(source.get("attempts") or 0)
+    target["failedAttempts"] = int(target.get("failedAttempts") or 0) + int(source.get("failedAttempts") or 0)
+    target["inputTokens"] = int(target.get("inputTokens") or 0) + int(source.get("inputTokens") or 0)
+    target["outputTokens"] = int(target.get("outputTokens") or 0) + int(source.get("outputTokens") or 0)
+    target["totalTokens"] = int(target.get("totalTokens") or 0) + int(source.get("totalTokens") or 0)
+    target["estimatedCostUSD"] = round(float(target.get("estimatedCostUSD") or 0) + float(source.get("estimatedCostUSD") or 0), 6)
+
+
+def generation_summary_from_json(data: dict[str, Any]) -> dict[str, Any]:
+    if not data:
+        return {}
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    model = data.get("model")
+    if isinstance(model, dict):
+        model_name = str(model.get("model") or model.get("id") or model.get("name") or "")
+        provider = str(model.get("provider") or "")
+        prompt_version = str(model.get("promptVersion") or "")
+    else:
+        model_name = str(model or "")
+        provider = str(data.get("provider") or "")
+        prompt_version = str(data.get("promptVersion") or "")
+    input_tokens = number_or_none(first_present(usage, "inputTokens", "input_tokens", "cacheReadInputTokens", "cache_read_input_tokens"))
+    output_tokens = number_or_none(first_present(usage, "outputTokens", "output_tokens"))
+    total_tokens = number_or_none(first_present(usage, "totalTokens", "total_tokens"))
+    if total_tokens is None and (input_tokens is not None or output_tokens is not None):
+        total_tokens = int(input_tokens or 0) + int(output_tokens or 0)
+    estimated_cost = number_or_none(first_present(usage, "estimatedCostUSD", "estimated_cost_usd", "costUSD", "cost_usd"))
+    generated_at = str(data.get("generatedAt") or data.get("generated_at") or data.get("createdUtc") or data.get("createdAt") or "")
+    if not any((model_name, generated_at, total_tokens is not None, estimated_cost is not None)):
+        return {}
+    return {
+        "model": model_name,
+        "provider": provider,
+        "promptVersion": prompt_version,
+        "generatedAt": generated_at,
+        "inputTokens": input_tokens,
+        "outputTokens": output_tokens,
+        "totalTokens": total_tokens,
+        "estimatedCostUSD": estimated_cost,
+        "status": str(data.get("status") or "succeeded"),
+        "errorMessage": str(data.get("errorMessage") or ""),
+    }
+
+
+def first_present(data: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in data:
+            return data[key]
+    return None
+
+
+def number_or_none(value: Any) -> int | float | None:
+    if value in (None, ""):
+        return None
+    try:
+        number = float(str(value).replace("$", "").replace(",", ""))
+    except ValueError:
+        return None
+    if number.is_integer():
+        return int(number)
+    return number
 
 
 def update_frame_review(body: dict[str, Any]) -> dict[str, Any]:
@@ -691,6 +1054,13 @@ def list_generated_files(generated_dir: Path) -> list[dict[str, Any]]:
     return files
 
 
+def latest_file_mtime(root: Path) -> float | None:
+    if not root.exists() or not root.is_dir():
+        return None
+    timestamps = [path.stat().st_mtime for path in root.iterdir() if path.is_file() and not path.name.startswith(".")]
+    return max(timestamps) if timestamps else None
+
+
 def run_command(command: list[str]) -> dict[str, Any]:
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
@@ -722,6 +1092,27 @@ def send_json(handler: Any, payload: dict[str, Any], status: int | HTTPStatus = 
     handler.send_header("Cache-Control", "no-store")
     handler.end_headers()
     handler.wfile.write(data)
+
+
+def parse_byte_range(range_header: str, file_size: int) -> tuple[int, int]:
+    match = re.match(r"^bytes=(\d*)-(\d*)$", range_header.strip())
+    if not match:
+        raise HttpError(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE, "Unsupported Range header.")
+    start_text, end_text = match.groups()
+    if not start_text and not end_text:
+        raise HttpError(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE, "Invalid Range header.")
+    if start_text:
+        start = int(start_text)
+        end = int(end_text) if end_text else file_size - 1
+    else:
+        suffix_length = int(end_text)
+        if suffix_length <= 0:
+            raise HttpError(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE, "Invalid suffix range.")
+        start = max(0, file_size - suffix_length)
+        end = file_size - 1
+    if start >= file_size or end < start:
+        raise HttpError(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE, "Requested range is outside the file.")
+    return start, min(end, file_size - 1)
 
 
 def safe_join(root: Path, relative_path: str) -> Path:
@@ -792,10 +1183,26 @@ def optional_transcript_path(raw_value: Any) -> Path | None:
 
 def require_session_dir(raw_value: Any) -> Path:
     session_id = require_session_id(raw_value)
-    session_dir = (PROCESSED_ROOT / session_id).resolve()
-    if not is_relative_to(session_dir, PROCESSED_ROOT) or not session_dir.is_dir():
+    session_dir = require_child_dir(PROCESSED_ROOT, session_id, "Session")
+    if not session_dir.is_dir():
         raise HttpError(HTTPStatus.NOT_FOUND, "Session not found in samples/processed.")
     return session_dir
+
+
+def require_child_dir(root: Path, child_name: str, label: str) -> Path:
+    root = root.resolve()
+    child = (root / child_name).resolve()
+    if not is_relative_to(child, root):
+        raise HttpError(HTTPStatus.BAD_REQUEST, f"{label} path escapes its allowed root.")
+    return child
+
+
+def optional_child_dir(root: Path, child_name: str, label: str) -> Path | None:
+    root = root.resolve()
+    child = (root / child_name).resolve()
+    if not is_relative_to(child, root):
+        raise HttpError(HTTPStatus.BAD_REQUEST, f"{label} path escapes its allowed root.")
+    return child
 
 
 def require_session_id(raw_value: Any) -> str:

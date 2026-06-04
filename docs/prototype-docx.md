@@ -80,7 +80,7 @@ Image paths may be absolute or relative to the input JSON, repository root, or c
 - Keep the visible body suitable for a customer-facing guide: no prompt text, raw JSON, AI reasoning language, prototype placeholders, or internal reference-project names.
 - Put reviewer concerns in Word comments instead of visible tags or body sections. This includes source timing, low confidence warnings, screenshot approval concerns, visible UI evidence, and action hints.
 - If Word comments are unavailable, render a clearly named `Reviewer Comments` fallback section so QA can distinguish reviewer-only content from the guide body.
-- Keep generation deterministic so offline fixture tests can compare structure without AI variability.
+- Keep DOCX rendering deterministic so offline fixture tests can compare structure without document-layout variability.
 
 ## Reviewer Comments
 

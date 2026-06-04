@@ -9,14 +9,14 @@ Use `Blink Rx Training Part 2 120525.mp4` as the primary optimization fixture un
 - Target application: `Blink Rx`
 - Source profile: `teams-recording`
 
-The Teams sidecar is the reference STT for transcript comparison. The no-sidecar lane uses local `whisper-cli` and `models/whisper/ggml-base.en.bin`.
+The Teams sidecar is the preferred guide-generation input for this recording. The no-sidecar lane uses local `whisper-cli` and `models/whisper/ggml-base.en.bin` only for fallback testing and STT comparison.
 
 ## Canonical Sessions
 
 | Lane | Session ID | Purpose |
 | --- | --- | --- |
 | Teams STT | `blink-rx-part-2-sidecar` | Uses the Teams-generated `.vtt` transcript. |
-| Local Whisper | `blink-rx-part-2-whisper` | Uses only the MP4 and local Whisper transcription. |
+| Local Whisper | `blink-rx-part-2-whisper` | Uses only the MP4 and local Whisper transcription. Use for comparison and for guide generation only when no transcript is available. |
 
 ## Processing Commands
 
@@ -50,35 +50,31 @@ Use the report to track:
 - average time-aligned segment similarity
 - low-similarity examples that may affect guide generation
 
-This is not a legal or academic transcript benchmark. It is a product-quality signal for whether local Whisper is good enough to produce customer-facing guide drafts without a sidecar transcript.
+This is not a legal or academic transcript benchmark. It is a product-quality signal for whether local Whisper is good enough when no sidecar transcript is available.
 
 ## Guide Generation Commands
 
-Run deterministic generation first:
+Because this Blink recording has a Teams transcript sidecar, generate only the sidecar-based Anthropic guide:
 
 ```bash
 npm run blink:draft:sidecar
 npm run blink:docx:sidecar
 npm run blink:qa:sidecar
-
-npm run blink:draft:whisper
-npm run blink:docx:whisper
-npm run blink:qa:whisper
 ```
 
-Use Anthropic only after transcript quality and frame review look sane:
+Equivalent direct commands:
 
 ```bash
 .venv/bin/python scripts/generate_guide_draft.py \
   samples/processed/blink-rx-part-2-sidecar/procedure_trace.json \
-  --output artifacts/generated/blink-rx-part-2-sidecar/guide_draft.anthropic.json \
-  --use-anthropic
+  --output artifacts/generated/blink-rx-part-2-sidecar/guide_draft.anthropic.json
 
-.venv/bin/python scripts/generate_guide_draft.py \
-  samples/processed/blink-rx-part-2-whisper/procedure_trace.json \
-  --output artifacts/generated/blink-rx-part-2-whisper/guide_draft.anthropic.json \
-  --use-anthropic
+.venv/bin/python scripts/build_guide_docx.py \
+  artifacts/generated/blink-rx-part-2-sidecar/guide_draft.anthropic.json \
+  --output artifacts/generated/blink-rx-part-2-sidecar/user_guide.anthropic.docx
 ```
+
+If a future recording has no transcript sidecar, process it without `--transcript` so the session uses local Whisper, then generate the Anthropic guide from that Whisper-backed session. Do not create both sidecar and Whisper guide versions for the same recording when a transcript is available.
 
 ## Anthropic Readiness Gate
 
@@ -89,10 +85,11 @@ Current review finding:
 - The non-Teams-profile Anthropic DOCX passed strict text QA but was visibly incomplete and contained only one embedded image.
 - The Teams-profile Anthropic DOCX had more useful procedure structure and five screenshots, but failed strict QA because placeholder-confidence language leaked into the visible body.
 
-The next Anthropic pass must be generated from the canonical sessions in this matrix after frame review:
+The next Anthropic pass for this Blink fixture must be generated from the sidecar session after frame review:
 
 - `blink-rx-part-2-sidecar`
-- `blink-rx-part-2-whisper`
+
+Use `blink-rx-part-2-whisper` for guide generation only if the Teams transcript sidecar is removed or unavailable.
 
 Acceptance criteria:
 
@@ -102,6 +99,14 @@ Acceptance criteria:
 - The visible body reads like a customer-facing user guide, not a transcript or internal QA report.
 - Low-confidence transcript issues, unclear UI labels, screenshot concerns, and source timing appear as Word comments only.
 - No visible AI thought process, raw trace content, placeholder confidence text, or internal reviewer tags appear in body text.
+- Purpose text describes the user workflow, not the local trace, AI pipeline, or recording-processing method.
+- Prerequisites contain only customer/user prerequisites. Reviewer or publishing instructions belong in Word comments or internal review notes.
+- Source Recording Metadata renders duration in a human-readable format such as `00:20:41`, not raw seconds.
+- Ambiguous UI language such as `required checkboxes` and unexplained terms such as `PV1` or `PDR` are either clearly defined in body text or routed to Word comments for reviewer verification.
+- DOCX step headings are concise action/state titles. They must not include duplicated section names, redundant `Step N` suffixes, or headings like `Step 5 — Submit a Refill Request: Step 14`.
+- The appendix must identify the target application as Blink Rx when the source recording or draft metadata provides it.
+- Reviewer guidance remains detailed enough to route production review, including segment IDs, timestamp ranges, low-confidence reasons, and screenshot gaps, but appears only in Word comments or the fallback Reviewer Comments section.
+- Anthropic drafts should organize the workflow into logical application sections rather than forcing one flat sequence of transcript-sized chunks.
 
 ## Review Rules
 

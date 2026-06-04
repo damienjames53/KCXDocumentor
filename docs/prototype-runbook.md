@@ -19,9 +19,9 @@ The prototype should degrade gracefully. If local media tools are missing, it sh
 
 ```bash
 python scripts/process_recording.py samples/raw/example.mp4
-python scripts/generate_guide_draft.py samples/processed/<session>/procedure_trace.json --use-anthropic --output artifacts/generated/<session>/guide_draft.json
-python scripts/build_guide_docx.py artifacts/generated/<session>/guide_draft.json --output artifacts/generated/<session>/user_guide.docx
-python scripts/qa_document_artifacts.py artifacts/generated/<session>/user_guide.docx
+python scripts/generate_guide_draft.py samples/processed/<session>/procedure_trace.json --output artifacts/generated/<session>/guide_draft.anthropic.json
+python scripts/build_guide_docx.py artifacts/generated/<session>/guide_draft.anthropic.json --output artifacts/generated/<session>/user_guide.anthropic.docx
+python scripts/qa_document_artifacts.py artifacts/generated/<session>/user_guide.anthropic.docx
 npm run eval:validate
 npm run eval:offline
 ```

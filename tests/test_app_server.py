@@ -4,6 +4,8 @@ import importlib.util
 import inspect
 import io
 import json
+import os
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
@@ -144,6 +146,255 @@ def test_app_state_lists_processed_sessions(tmp_path: Path, monkeypatch: pytest.
     assert len(sessions) == 1
     assert sessions[0]["sessionId"] == "session-a"
     assert sessions[0]["segmentCount"] is None
+
+
+def test_session_modified_time_uses_generated_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    processed_root = tmp_path / "samples" / "processed"
+    generated_root = tmp_path / "artifacts" / "generated"
+    session_dir = processed_root / "session-a"
+    generated_dir = generated_root / "session-a"
+    session_dir.mkdir(parents=True)
+    generated_dir.mkdir(parents=True)
+    (session_dir / "manifest.json").write_text(json.dumps({"schemaVersion": 1, "sessionId": "session-a"}), encoding="utf-8")
+    docx = generated_dir / "user_guide.anthropic.docx"
+    docx.write_bytes(b"docx")
+    os.utime(session_dir, (1000, 1000))
+    os.utime(docx, (2000, 2000))
+    monkeypatch.setattr(module, "PROCESSED_ROOT", processed_root)
+    monkeypatch.setattr(module, "GENERATED_ROOT", generated_root)
+
+    session = module.summarize_session(session_dir)
+
+    assert session["modifiedUtc"] == module.utc_from_timestamp(2000)
+
+
+def test_usage_summary_aggregates_generation_reports_by_range(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    generated_root = tmp_path / "artifacts" / "generated"
+    first = generated_root / "session-a"
+    second = generated_root / "session-b"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    (first / "generation_report.json").write_text(
+        json.dumps(
+            {
+                "generatedAt": "2026-06-04T16:34:09Z",
+                "sessionId": "session-a",
+                "title": "Guide A",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "inputTokens": 1000,
+                    "outputTokens": 200,
+                    "totalTokens": 1200,
+                    "estimatedCostUSD": 0.006,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (second / "generation_report.json").write_text(
+        json.dumps(
+            {
+                "generatedAt": "2026-06-05T10:00:00Z",
+                "sessionId": "session-b",
+                "title": "Guide B",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "inputTokens": 3000,
+                    "outputTokens": 400,
+                    "totalTokens": 3400,
+                    "estimatedCostUSD": 0.015,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "GENERATED_ROOT", generated_root)
+    monkeypatch.setattr(module, "USAGE_DB_PATH", tmp_path / "artifacts" / "usage" / "empty.sqlite3")
+
+    daily = module.read_usage_summary("day")
+    weekly = module.read_usage_summary("week")
+
+    assert daily["totals"] == {
+        "documents": 2,
+        "attempts": 2,
+        "failedAttempts": 0,
+        "inputTokens": 4000,
+        "outputTokens": 600,
+        "totalTokens": 4600,
+        "estimatedCostUSD": 0.021,
+    }
+    assert [bucket["label"] for bucket in daily["buckets"]] == ["2026-06-04", "2026-06-05"]
+    assert daily["buckets"][0]["documents"][0]["sessionId"] == "session-a"
+    assert weekly["buckets"][0]["label"] == "2026-W23"
+    assert weekly["buckets"][0]["totals"]["documents"] == 2
+
+
+def test_usage_summary_keeps_db_entries_after_session_report_is_deleted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    generated_root = tmp_path / "artifacts" / "generated"
+    db_path = tmp_path / "artifacts" / "usage" / "generation_usage.sqlite3"
+    generated_root.mkdir(parents=True)
+    db_path.parent.mkdir(parents=True)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE generation_usage (
+                generation_run_id TEXT PRIMARY KEY,
+                generated_at TEXT,
+                recorded_at TEXT,
+                session_id TEXT,
+                title TEXT,
+                provider TEXT,
+                model TEXT,
+                prompt_version TEXT,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                total_tokens INTEGER,
+                estimated_cost_usd REAL,
+                report_json TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO generation_usage VALUES (
+                'run-a', '2026-06-04T16:34:09Z', '2026-06-04T16:35:00Z',
+                'deleted-session', 'Deleted Session Guide', 'anthropic',
+                'claude-sonnet-4-6', 'guide-draft-v1', 1200, 300, 1500,
+                0.0081, '{}'
+            )
+            """
+        )
+    monkeypatch.setattr(module, "GENERATED_ROOT", generated_root)
+    monkeypatch.setattr(module, "USAGE_DB_PATH", db_path)
+
+    summary = module.read_usage_summary("month")
+
+    assert summary["totals"]["documents"] == 1
+    assert summary["totals"]["attempts"] == 1
+    assert summary["totals"]["failedAttempts"] == 0
+    assert summary["totals"]["totalTokens"] == 1500
+    assert summary["totals"]["estimatedCostUSD"] == 0.0081
+    assert summary["buckets"][0]["documents"][0]["sessionId"] == "deleted-session"
+
+
+def test_usage_summary_counts_failed_attempt_spend_without_document(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    generated_root = tmp_path / "artifacts" / "generated"
+    failed_dir = generated_root / "failed-session"
+    failed_dir.mkdir(parents=True)
+    (failed_dir / "generation_failure.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "status": "failed",
+                "generatedAt": "2026-06-04T16:34:09Z",
+                "sessionId": "failed-session",
+                "title": "Failed guide generation",
+                "model": "claude-sonnet-4-6",
+                "provider": "anthropic",
+                "promptVersion": "guide-draft-v1",
+                "usage": {
+                    "inputTokens": 2000,
+                    "outputTokens": 500,
+                    "totalTokens": 2500,
+                    "estimatedCostUSD": 0.0135,
+                },
+                "errorMessage": "Anthropic returned invalid guide JSON.",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "GENERATED_ROOT", generated_root)
+    monkeypatch.setattr(module, "USAGE_DB_PATH", tmp_path / "artifacts" / "usage" / "empty.sqlite3")
+
+    summary = module.read_usage_summary("day")
+
+    assert summary["totals"]["documents"] == 0
+    assert summary["totals"]["attempts"] == 1
+    assert summary["totals"]["failedAttempts"] == 1
+    assert summary["totals"]["totalTokens"] == 2500
+    assert summary["totals"]["estimatedCostUSD"] == 0.0135
+    document = summary["buckets"][0]["documents"][0]
+    assert document["status"] == "failed"
+    assert document["errorMessage"] == "Anthropic returned invalid guide JSON."
+
+
+def test_session_source_video_uses_manifest_recording_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    source = tmp_path / "samples" / "raw" / "demo.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"fake video")
+
+    resolved = module.session_source_path({"sourceFile": str(source)})
+
+    assert resolved == source.resolve()
+
+
+def test_parse_byte_range_supports_video_scrubbing_requests() -> None:
+    module = load_app_server()
+
+    assert module.parse_byte_range("bytes=10-19", 100) == (10, 19)
+    assert module.parse_byte_range("bytes=90-", 100) == (90, 99)
+    assert module.parse_byte_range("bytes=-10", 100) == (90, 99)
+    with pytest.raises(module.HttpError):
+        module.parse_byte_range("bytes=100-120", 100)
+
+
+def test_delete_session_artifacts_removes_processed_and_generated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    processed_root = tmp_path / "samples" / "processed"
+    generated_root = tmp_path / "artifacts" / "generated"
+    session_dir = processed_root / "session-a"
+    generated_dir = generated_root / "session-a"
+    db_path = tmp_path / "artifacts" / "usage" / "generation_usage.sqlite3"
+    session_dir.mkdir(parents=True)
+    generated_dir.mkdir(parents=True)
+    db_path.parent.mkdir(parents=True)
+    (session_dir / "manifest.json").write_text(json.dumps({"schemaVersion": 1, "sessionId": "session-a"}), encoding="utf-8")
+    (generated_dir / "user_guide.anthropic.docx").write_bytes(b"docx")
+    db_path.write_bytes(b"sqlite placeholder")
+    monkeypatch.setattr(module, "PROCESSED_ROOT", processed_root)
+    monkeypatch.setattr(module, "GENERATED_ROOT", generated_root)
+    monkeypatch.setattr(module, "USAGE_DB_PATH", db_path)
+
+    result = module.delete_session_artifacts({"sessionId": "session-a"})
+
+    assert result["sessionId"] == "session-a"
+    assert len(result["deleted"]) == 2
+    assert any(path.endswith("samples/processed/session-a") for path in result["deleted"])
+    assert any(path.endswith("artifacts/generated/session-a") for path in result["deleted"])
+    assert not session_dir.exists()
+    assert not generated_dir.exists()
+    assert db_path.exists()
+    assert db_path.read_bytes() == b"sqlite placeholder"
+    assert result["sessions"] == []
+
+
+def test_delete_session_artifacts_rejects_path_escape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    processed_root = tmp_path / "samples" / "processed"
+    generated_root = tmp_path / "artifacts" / "generated"
+    outside_dir = tmp_path / "outside-session"
+    protected_file = outside_dir / "keep.txt"
+    processed_root.mkdir(parents=True)
+    generated_root.mkdir(parents=True)
+    outside_dir.mkdir()
+    protected_file.write_text("do not delete", encoding="utf-8")
+    try:
+        (processed_root / "session-a").symlink_to(outside_dir, target_is_directory=True)
+    except OSError:
+        pytest.skip("filesystem does not allow directory symlinks")
+    monkeypatch.setattr(module, "PROCESSED_ROOT", processed_root)
+    monkeypatch.setattr(module, "GENERATED_ROOT", generated_root)
+
+    with pytest.raises(module.HttpError) as exc:
+        module.delete_session_artifacts({"sessionId": "session-a"})
+
+    assert exc.value.status == 400
+    assert protected_file.exists()
 
 
 def test_processing_command_builder_uses_python_and_no_media_tools_when_requested(tmp_path: Path) -> None:

@@ -47,14 +47,14 @@ python3 -m venv .venv
 
 ```bash
 .venv/bin/python scripts/process_recording.py samples/raw/example.mp4 --no-media-tools --target-application "Enterprise Rx" --session-id prototype-demo --force
-.venv/bin/python scripts/generate_guide_draft.py samples/processed/prototype-demo/procedure_trace.json --use-anthropic --output artifacts/generated/prototype-demo/guide_draft.json
-.venv/bin/python scripts/build_guide_docx.py artifacts/generated/prototype-demo/guide_draft.json --output artifacts/generated/prototype-demo/user_guide.docx
-.venv/bin/python scripts/qa_document_artifacts.py artifacts/generated/prototype-demo/user_guide.docx
+.venv/bin/python scripts/generate_guide_draft.py samples/processed/prototype-demo/procedure_trace.json --output artifacts/generated/prototype-demo/guide_draft.anthropic.json
+.venv/bin/python scripts/build_guide_docx.py artifacts/generated/prototype-demo/guide_draft.anthropic.json --output artifacts/generated/prototype-demo/user_guide.anthropic.docx
+.venv/bin/python scripts/qa_document_artifacts.py artifacts/generated/prototype-demo/user_guide.anthropic.docx
 npm run eval:validate
 npm run eval:offline
 ```
 
-The same flow is also available through `npm run prototype:process`, `npm run prototype:draft`, `npm run prototype:docx`, and `npm run prototype:qa` when `python` points at an environment with the Python dependencies installed.
+The same flow is also available through `npm run prototype:process`, `npm run prototype:draft`, `npm run prototype:docx`, and `npm run prototype:qa`.
 
 See `docs/prototype-runbook.md` for the current run criteria.
 
@@ -68,4 +68,6 @@ Start the local browser console:
 
 Then open `http://127.0.0.1:8765`.
 
-The app lists recordings from `samples/raw/`, processes a selected recording into `samples/processed/`, generates deterministic or Anthropic guide drafts, builds DOCX files, and runs DOCX QA checks.
+The app lists recordings from `samples/raw/`, processes a selected recording into `samples/processed/`, generates Anthropic guide drafts, builds DOCX files, and runs DOCX QA checks.
+
+For step-by-step operator instructions, see `docs/user-guide.md`.

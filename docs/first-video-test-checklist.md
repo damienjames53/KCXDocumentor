@@ -85,21 +85,12 @@ Check:
 
 ## 5. Generate a Draft
 
-Deterministic first:
+Generate with Anthropic Sonnet 4.6 only after the trace and frame review look sane:
 
 ```bash
 .venv/bin/python scripts/generate_guide_draft.py \
   samples/processed/first-video-short/procedure_trace.json \
-  --output artifacts/generated/first-video-short/guide_draft.deterministic.json
-```
-
-Anthropic Sonnet 4.6 only after the trace looks sane:
-
-```bash
-.venv/bin/python scripts/generate_guide_draft.py \
-  samples/processed/first-video-short/procedure_trace.json \
-  --output artifacts/generated/first-video-short/guide_draft.anthropic.json \
-  --use-anthropic
+  --output artifacts/generated/first-video-short/guide_draft.anthropic.json
 ```
 
 Expected:
@@ -112,15 +103,15 @@ Expected:
 
 ```bash
 .venv/bin/python scripts/build_guide_docx.py \
-  artifacts/generated/first-video-short/guide_draft.deterministic.json \
-  --output artifacts/generated/first-video-short/user_guide.deterministic.docx
+  artifacts/generated/first-video-short/guide_draft.anthropic.json \
+  --output artifacts/generated/first-video-short/user_guide.anthropic.docx
 
 .venv/bin/python scripts/qa_document_artifacts.py \
-  artifacts/generated/first-video-short/user_guide.deterministic.docx \
+  artifacts/generated/first-video-short/user_guide.anthropic.docx \
   --json
 
 .venv/bin/python scripts/qa_document_artifacts.py \
-  artifacts/generated/first-video-short/user_guide.deterministic.docx \
+  artifacts/generated/first-video-short/user_guide.anthropic.docx \
   --json \
   --strict
 ```

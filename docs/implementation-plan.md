@@ -12,7 +12,7 @@ The MVP consumes pre-recorded files rather than recording the screen itself.
 
 1. Import an existing one-hour recording.
 2. Extract audio locally.
-3. Transcribe speech locally with `whisper.cpp`.
+3. Use a transcript sidecar when one is available; otherwise transcribe speech locally with `whisper.cpp`.
 4. Sample video frames locally.
 5. Remove duplicate or low-value frames.
 6. OCR candidate frames locally.
@@ -50,6 +50,8 @@ Current local app direction:
 - Keep the first testing app as a lightweight local web console.
 - Use CustomerAppUI-style semantic CSS tokens: `--kcx-ui-*`.
 - Prefer the CustomerAppUI primitive concepts: panels, buttons, status badges, app/top shell, form fields, and layout grids.
+- Keep per-session generation metadata visible with the selected session's artifacts, including model, generated timestamp, input/output/total tokens, and estimated cost.
+- Provide a separate AI Spend page for aggregate generated-document count and token cost by `day`, `week`, `month`, or `year`, plus a header-level current calendar month spend summary.
 - Avoid one-off palettes, component forks, or custom CSS injection patterns.
 - If the product moves to a thick Windows client, keep the same information architecture and visual semantics where practical.
 - If the product moves to a full web client, consider adopting CustomerAppUI packages or copying the required token/style artifacts locally rather than depending on the reference repo path.
@@ -127,7 +129,7 @@ This starts as a local web page that reads the processed session bundle and writ
 
 The review surface should use the CustomerAppUI visual standard even during the prototype stage so the workflow can graduate into either a web client or Windows client without rethinking the product ergonomics.
 
-The current Blink Rx test showed that Anthropic can produce better procedure prose than the deterministic fallback, but the generated DOCX is not customer-ready unless the reviewer concerns are handled correctly. Reviewer concerns such as unclear transcript stretches, screenshot approval, UI evidence, source timing, placeholder OCR, and confidence issues must appear in Word comments or reviewer-only fallback sections, not in the visible guide body.
+The current Blink Rx test showed that Anthropic can produce useful procedure prose, but the generated DOCX is not customer-ready unless the reviewer concerns are handled correctly. Reviewer concerns such as unclear transcript stretches, screenshot approval, UI evidence, source timing, placeholder OCR, and confidence issues must appear in Word comments or reviewer-only fallback sections, not in the visible guide body.
 
 ## Current Test Fixture
 
@@ -135,14 +137,15 @@ Use `Blink Rx Training Part 2 120525.mp4` as the primary optimization fixture un
 
 Canonical processing lanes:
 
-- `blink-rx-part-2-sidecar`: uses the Teams-generated `.vtt` transcript as the reference STT.
-- `blink-rx-part-2-whisper`: uses only the MP4 with local `whisper.cpp` transcription.
+- `blink-rx-part-2-sidecar`: uses the Teams-generated `.vtt` transcript and is the guide-generation lane for this fixture.
+- `blink-rx-part-2-whisper`: uses only the MP4 with local `whisper.cpp` transcription. Use it for comparison and for guide generation only when no transcript is available.
 
 Required comparison:
 
 - Run Teams STT versus local Whisper comparison with `npm run blink:compare:stt`.
 - Track approximate WER, vocabulary overlap, average aligned-segment similarity, and low-similarity examples.
 - Treat the comparison as a product-quality signal, not an academic transcript benchmark.
+- Do not produce both sidecar-based and Whisper-based guide DOCX files for the same recording when a transcript sidecar is available.
 
 Current observed baseline for the regenerated Blink Rx lanes:
 
@@ -157,7 +160,7 @@ Current observed baseline for the regenerated Blink Rx lanes:
 
 A generated DOCX is not customer-ready just because it exists or passes normal QA. The gate for a customer-facing artifact is:
 
-- Anthropic draft generated from one of the current canonical Blink Rx sessions, not stale pre-fix traces.
+- Anthropic draft generated from the best available transcript source: sidecar transcript first, local Whisper only when no transcript is available.
 - Frame review completed before final generation or DOCX build.
 - Approved screenshots embedded in the DOCX; rejected screenshots excluded.
 - No visible AI thought process, prompt text, raw JSON, placeholder confidence text, or internal QA language in the guide body.
@@ -197,6 +200,7 @@ The older Anthropic Blink artifacts are retained only as evidence. They are not 
 - Include selected screenshots with captions and step references.
 - Keep reviewer concerns in DOCX comments rather than visible guide body text.
 - Run schema validation and basic forbidden-leak/placeholder QA before accepting generated DOCX output.
+- Track generation usage in the local SQLite database at `artifacts/usage/generation_usage.sqlite3` and expose `/api/usage-summary?range=day|week|month|year` using the response shape `{range, generatedAt, totals:{documents,inputTokens,outputTokens,totalTokens,estimatedCostUSD}, buckets:[...]}` so the top-level reporting page can show document count and estimated token cost over time even after individual sessions are deleted.
 
 ### Phase 4 - QA/Eval Harness
 

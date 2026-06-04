@@ -4,18 +4,51 @@ const state = {
   sessions: [],
   selectedSessionId: "",
   session: null,
+  generationMetadata: null,
   frameReview: {
     endpointAvailable: null,
     items: {},
   },
+  frameCapturePicker: {
+    open: false,
+    sessionId: "",
+  },
+  frameInspect: {
+    open: false,
+    frameId: "",
+  },
+  usage: {
+    range: "month",
+    summary: null,
+    currentMonthSummary: null,
+    currentMonthLoading: false,
+    loading: false,
+    error: "",
+  },
+  activePage: "workspace",
   activeTab: "trace",
   busy: false,
-  lastDraft: "deterministic",
+  operationMessage: "",
+  operationMessages: [],
+  operationMessageIndex: 0,
+  operationTimer: null,
 };
 
+const AI_CREATE_MESSAGES = [
+  "Reading the walkthrough...",
+  "Finding the workflow structure...",
+  "Choosing the clearest screenshots...",
+  "Drafting trainer-ready steps...",
+  "Checking for reviewer concerns...",
+  "Building the Word guide...",
+  "Running local QA checks...",
+];
+
 const els = {
-  apiStatus: document.querySelector("#apiStatus"),
-  toolStatus: document.querySelector("#toolStatus"),
+  workspacePage: document.querySelector("#workspacePage"),
+  usagePage: document.querySelector("#usagePage"),
+  globalUsageButton: document.querySelector("#globalUsageButton"),
+  globalUsageMetric: document.querySelector("#globalUsageMetric"),
   refreshAll: document.querySelector("#refreshAll"),
   pipelineForm: document.querySelector("#pipelineForm"),
   recordingFile: document.querySelector("#recordingFile"),
@@ -31,16 +64,20 @@ const els = {
   forceProcess: document.querySelector("#forceProcess"),
   noMediaTools: document.querySelector("#noMediaTools"),
   processButton: document.querySelector("#processButton"),
-  deterministicDraftButton: document.querySelector("#deterministicDraftButton"),
-  anthropicDraftButton: document.querySelector("#anthropicDraftButton"),
+  generateDraftButton: document.querySelector("#generateDraftButton"),
   buildDocxButton: document.querySelector("#buildDocxButton"),
   qaDocxButton: document.querySelector("#qaDocxButton"),
+  qaStatusTitle: document.querySelector("#qaStatusTitle"),
+  qaStatusText: document.querySelector("#qaStatusText"),
+  operationStatus: document.querySelector("#operationStatus"),
+  operationStatusText: document.querySelector("#operationStatusText"),
   selectedSessionPill: document.querySelector("#selectedSessionPill"),
   recordingCount: document.querySelector("#recordingCount"),
   sessionCount: document.querySelector("#sessionCount"),
   recordingList: document.querySelector("#recordingList"),
   sessionList: document.querySelector("#sessionList"),
   reloadSession: document.querySelector("#reloadSession"),
+  clearSession: document.querySelector("#clearSession"),
   durationMetric: document.querySelector("#durationMetric"),
   segmentMetric: document.querySelector("#segmentMetric"),
   reviewMetric: document.querySelector("#reviewMetric"),
@@ -51,8 +88,28 @@ const els = {
   addFrameTimestamp: document.querySelector("#addFrameTimestamp"),
   addFrameSegment: document.querySelector("#addFrameSegment"),
   addFrameButton: document.querySelector("#addFrameButton"),
+  addFrameTimestampButton: document.querySelector("#addFrameTimestampButton"),
+  frameCapturePicker: document.querySelector("#frameCapturePicker"),
+  frameCaptureStatus: document.querySelector("#frameCaptureStatus"),
+  sessionVideo: document.querySelector("#sessionVideo"),
+  sessionVideoTime: document.querySelector("#sessionVideoTime"),
+  useVideoTimeButton: document.querySelector("#useVideoTimeButton"),
+  closeFrameCapture: document.querySelector("#closeFrameCapture"),
+  frameInspectModal: document.querySelector("#frameInspectModal"),
+  frameInspectTitle: document.querySelector("#frameInspectTitle"),
+  frameInspectMeta: document.querySelector("#frameInspectMeta"),
+  frameInspectImage: document.querySelector("#frameInspectImage"),
+  frameInspectDetails: document.querySelector("#frameInspectDetails"),
+  closeFrameInspect: document.querySelector("#closeFrameInspect"),
   frameGrid: document.querySelector("#frameGrid"),
   artifactList: document.querySelector("#artifactList"),
+  generationMetadata: document.querySelector("#generationMetadata"),
+  usageStatus: document.querySelector("#usageStatus"),
+  usageDocumentMetric: document.querySelector("#usageDocumentMetric"),
+  usageTokenMetric: document.querySelector("#usageTokenMetric"),
+  usageInOutMetric: document.querySelector("#usageInOutMetric"),
+  usageCostMetric: document.querySelector("#usageCostMetric"),
+  usageBreakdown: document.querySelector("#usageBreakdown"),
   jsonPreview: document.querySelector("#jsonPreview"),
   readinessPill: document.querySelector("#readinessPill"),
   readinessList: document.querySelector("#readinessList"),
@@ -67,19 +124,34 @@ document.addEventListener("DOMContentLoaded", () => {
 
 function bindEvents() {
   els.refreshAll.addEventListener("click", refreshAll);
+  els.globalUsageButton.addEventListener("click", () => {
+    setActivePage("usage");
+  });
   els.importRecordingButton.addEventListener("click", importRecording);
   els.importTranscriptButton.addEventListener("click", importTranscript);
   els.pipelineForm.addEventListener("submit", processRecording);
   els.addFrameForm.addEventListener("submit", addFrameCandidate);
+  els.addFrameButton.addEventListener("click", openFrameCapturePicker);
+  els.useVideoTimeButton.addEventListener("click", addFrameCandidateFromVideo);
+  els.closeFrameCapture.addEventListener("click", closeFrameCapturePicker);
+  els.sessionVideo.addEventListener("loadedmetadata", updateSessionVideoTime);
+  els.sessionVideo.addEventListener("timeupdate", updateSessionVideoTime);
+  els.sessionVideo.addEventListener("seeked", updateSessionVideoTime);
+  els.sessionVideo.addEventListener("error", handleSessionVideoError);
+  els.closeFrameInspect.addEventListener("click", closeFrameInspect);
+  els.frameInspectModal.addEventListener("click", handleFrameInspectBackdrop);
+  document.addEventListener("keydown", handleGlobalKeydown);
   els.frameGrid.addEventListener("click", handleFrameAction);
   els.frameGrid.addEventListener("change", handleFrameFieldChange);
   els.frameGrid.addEventListener("input", handleFrameNoteInput);
-  els.deterministicDraftButton.addEventListener("click", () => generateDraft(false));
-  els.anthropicDraftButton.addEventListener("click", () => generateDraft(true));
-  els.buildDocxButton.addEventListener("click", buildDocx);
+  els.sessionList.addEventListener("click", handleSessionListClick);
+  els.generateDraftButton.addEventListener("click", generateDraft);
+  els.buildDocxButton.addEventListener("click", downloadDocx);
   els.qaDocxButton.addEventListener("click", runDocxQa);
   els.reloadSession.addEventListener("click", () => loadSelectedSession());
-  els.recordingSelect.addEventListener("change", syncSessionIdPlaceholder);
+  els.clearSession.addEventListener("click", clearSelectedSession);
+  els.recordingSelect.addEventListener("change", handleRecordingSelectionChange);
+  els.sessionIdInput.addEventListener("input", updateActionAvailability);
   els.transcriptSelect.addEventListener("change", () => {
     els.transcriptPathInput.value = els.transcriptSelect.value;
   });
@@ -90,35 +162,39 @@ function bindEvents() {
       renderTabs();
     });
   });
+
+  document.querySelectorAll("[data-page]").forEach((button) => {
+    button.addEventListener("click", () => setActivePage(button.dataset.page));
+  });
+
+  document.querySelectorAll("[data-usage-range]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.usage.range = button.dataset.usageRange;
+      loadUsageSummary();
+    });
+  });
 }
 
 async function refreshAll() {
   setBusy(true);
   try {
-    const [recordings, sessions, transcripts, health] = await Promise.all([
+    const [recordings, sessions, transcripts] = await Promise.all([
       apiGet("/api/recordings"),
       apiGet("/api/sessions"),
       loadTranscripts(),
-      loadHealth(),
     ]);
     state.recordings = normalizeCollection(recordings, "recordings");
-    state.sessions = normalizeCollection(sessions, "sessions");
+    state.sessions = sortSessions(normalizeCollection(sessions, "sessions"));
     state.transcripts = normalizeCollection(transcripts, "transcripts");
-    setApiStatus("API ready", "good");
-    setToolStatus(health);
     logActivity("Loaded recordings and sessions.");
     renderRecordings();
     renderTranscripts();
     renderSessions();
     syncSessionIdPlaceholder();
+    loadCurrentMonthSpend({ silent: true });
 
-    if (!state.selectedSessionId && state.sessions.length > 0) {
-      selectSession(getSessionId(state.sessions[0]), { load: true });
-    } else {
-      renderAll();
-    }
+    renderAll();
   } catch (error) {
-    setApiStatus("API unavailable", "bad");
     logActivity(error.message, "error");
     renderRecordings();
     renderTranscripts();
@@ -137,11 +213,40 @@ async function loadTranscripts() {
   }
 }
 
-async function loadHealth() {
+async function loadUsageSummary(options = {}) {
+  const range = state.usage.range || "day";
+  state.usage.loading = true;
+  state.usage.error = "";
+  renderUsage();
   try {
-    return await apiGet("/api/health");
-  } catch {
-    return null;
+    const summary = await apiGet(`/api/usage-summary?range=${encodeURIComponent(range)}`);
+    state.usage.summary = normalizeUsageSummary(summary, range);
+  } catch (error) {
+    state.usage.summary = null;
+    state.usage.error = error.message;
+    if (!options.silent) {
+      logActivity(`Usage summary unavailable: ${error.message}`, "warn");
+    }
+  } finally {
+    state.usage.loading = false;
+    renderUsage();
+  }
+}
+
+async function loadCurrentMonthSpend(options = {}) {
+  state.usage.currentMonthLoading = true;
+  renderGlobalUsage();
+  try {
+    const summary = await apiGet("/api/usage-summary?range=month");
+    state.usage.currentMonthSummary = normalizeUsageSummary(summary, "month");
+  } catch (error) {
+    state.usage.currentMonthSummary = null;
+    if (!options.silent) {
+      logActivity(`Current month spend unavailable: ${error.message}`, "warn");
+    }
+  } finally {
+    state.usage.currentMonthLoading = false;
+    renderGlobalUsage();
   }
 }
 
@@ -231,43 +336,50 @@ async function processRecording(event) {
   }
 }
 
-async function generateDraft(useAnthropic) {
+async function generateDraft() {
   const sessionId = requireSessionId();
   if (!sessionId) return;
 
+  setOperation("Starting AI guide creation...", AI_CREATE_MESSAGES);
   setBusy(true);
   try {
-    const result = await apiPost("/api/generate-draft", {
-      sessionId,
-      useAnthropic,
-      provider: useAnthropic ? "anthropic" : "deterministic",
-    });
-    state.lastDraft = useAnthropic ? "anthropic" : "deterministic";
-    logActivity(`${useAnthropic ? "Anthropic" : "Deterministic"} draft generated.`);
-    state.session = mergeSessionResult(state.session, result);
-    await loadSession(sessionId);
+    setOperation("Reading the walkthrough and building the guide structure...", AI_CREATE_MESSAGES);
+    const draftResult = await apiPost("/api/generate-draft", { sessionId });
+    assertCommandSucceeded(draftResult, "AI draft generation");
+    logActivity("Anthropic draft generated.");
+    state.session = mergeSessionResult(state.session, draftResult);
+    await refreshSessionState(sessionId);
+
+    setOperation("Building the Word guide from the AI draft...", AI_CREATE_MESSAGES);
+    await buildDocxForSession(sessionId);
+
+    setOperation("Running local QA checks on the Word guide...", AI_CREATE_MESSAGES);
+    await runDocxQaForSession(sessionId);
+
+    await loadUsageSummary({ silent: true });
+    await loadCurrentMonthSpend({ silent: true });
+    setOperation("Guide ready. Download the DOCX when you are ready to review.");
+    logActivity("Guide created, DOCX built, and QA completed.");
   } catch (error) {
-    logActivity(`Draft generation failed: ${error.message}`, "error");
+    await loadUsageSummary({ silent: true });
+    await loadCurrentMonthSpend({ silent: true });
+    setOperation("Guide creation stopped. Failed AI usage is recorded when Anthropic returned token data.");
+    logActivity(`Guide creation failed: ${error.message}`, "error");
   } finally {
     setBusy(false);
+    window.setTimeout(() => {
+      if (!state.busy) setOperation("");
+    }, 2500);
   }
 }
 
-async function buildDocx() {
-  const sessionId = requireSessionId();
-  if (!sessionId) return;
-
-  setBusy(true);
-  try {
-    const result = await apiPost("/api/build-docx", { sessionId, draft: state.lastDraft || "deterministic" });
-    logActivity(`${state.lastDraft === "anthropic" ? "Anthropic" : "Deterministic"} DOCX build completed.`);
-    state.session = mergeSessionResult(state.session, result);
-    await loadSession(sessionId);
-  } catch (error) {
-    logActivity(`DOCX build failed: ${error.message}`, "error");
-  } finally {
-    setBusy(false);
-  }
+async function buildDocxForSession(sessionId) {
+  const result = await apiPost("/api/build-docx", { sessionId });
+  assertCommandSucceeded(result, "DOCX build");
+  logActivity("DOCX built.");
+  state.session = mergeSessionResult(state.session, result);
+  await refreshSessionState(sessionId);
+  return result;
 }
 
 async function runDocxQa() {
@@ -276,22 +388,7 @@ async function runDocxQa() {
 
   setBusy(true);
   try {
-    const normal = await apiPost("/api/qa-docx", { sessionId, draft: state.lastDraft || "deterministic" });
-    let strict = null;
-    try {
-      strict = await apiPost("/api/qa-docx", { sessionId, draft: state.lastDraft || "deterministic", strict: true });
-    } catch (error) {
-      strict = { passed: false, error: error.message };
-    }
-    state.session = mergeSessionResult(state.session, {
-      qa: {
-        normal,
-        strict,
-        status: normal.passed && strict?.passed ? "publish-ready" : normal.passed ? "review-only" : "failed",
-      },
-    });
-    logActivity(`QA complete: ${state.session.qa.status}.`, state.session.qa.status === "failed" ? "error" : "info");
-    renderAll();
+    await runDocxQaForSession(sessionId);
   } catch (error) {
     logActivity(`QA failed: ${error.message}`, "error");
   } finally {
@@ -299,9 +396,44 @@ async function runDocxQa() {
   }
 }
 
+async function runDocxQaForSession(sessionId) {
+  const normal = await apiPost("/api/qa-docx", { sessionId });
+  let strict = null;
+  try {
+    strict = await apiPost("/api/qa-docx", { sessionId, strict: true });
+  } catch (error) {
+    strict = { passed: false, error: error.message };
+  }
+  state.session = mergeSessionResult(state.session, {
+    qa: {
+      normal,
+      strict,
+      status: normal.passed && strict?.passed ? "publish-ready" : normal.passed ? "review-only" : "failed",
+    },
+  });
+  logActivity(`QA complete: ${state.session.qa.status}.`, state.session.qa.status === "failed" ? "error" : "info");
+  renderAll();
+  return state.session.qa;
+}
+
+function downloadDocx() {
+  const artifact = getArtifacts().find((item) => /user_guide.*\.docx$/i.test(item.name || item.path || ""));
+  const downloadUrl = artifact ? artifactDownloadUrl(artifact) : "";
+  if (!downloadUrl) {
+    logActivity("Build a guide before downloading the DOCX.", "warn");
+    return;
+  }
+  const link = document.createElement("a");
+  link.href = downloadUrl;
+  link.download = artifact.name || "user_guide.anthropic.docx";
+  document.body.append(link);
+  link.click();
+  link.remove();
+}
+
 async function refreshSessions() {
   const sessions = await apiGet("/api/sessions");
-  state.sessions = normalizeCollection(sessions, "sessions");
+  state.sessions = sortSessions(normalizeCollection(sessions, "sessions"));
   renderSessions();
 }
 
@@ -312,14 +444,65 @@ async function loadSelectedSession() {
   }
 }
 
+async function clearSelectedSession() {
+  const sessionId = requireSessionId();
+  if (!sessionId) return;
+  await deleteSession(sessionId);
+}
+
+async function deleteSession(sessionId) {
+  if (!window.confirm(`Delete processed session "${sessionId}" and its generated guide artifacts?`)) {
+    return;
+  }
+
+  setBusy(true);
+  try {
+    const result = await apiPost("/api/delete-session", { sessionId });
+    const deleted = Array.isArray(result.deleted) ? result.deleted.length : 0;
+    logActivity(`Deleted ${sessionId}; removed ${deleted} folder${deleted === 1 ? "" : "s"}.`);
+    if (state.selectedSessionId === sessionId || els.sessionIdInput.value.trim() === sessionId) {
+      state.selectedSessionId = "";
+      state.session = null;
+      state.generationMetadata = null;
+      state.frameReview = { endpointAvailable: null, items: {} };
+      resetFrameCapturePicker();
+      closeFrameInspect();
+      els.sessionIdInput.value = "";
+    }
+    await refreshAll();
+  } catch (error) {
+    logActivity(`Session cleanup failed: ${error.message}`, "error");
+    renderAll();
+  } finally {
+    setBusy(false);
+  }
+}
+
+function handleSessionListClick(event) {
+  const deleteButton = event.target.closest("[data-session-delete]");
+  if (deleteButton) {
+    event.stopPropagation();
+    deleteSession(deleteButton.dataset.sessionDelete);
+    return;
+  }
+
+  const sessionButton = event.target.closest("[data-session-select]");
+  if (sessionButton) {
+    selectSession(sessionButton.dataset.sessionSelect, { load: true });
+  }
+}
+
 async function loadSession(sessionId) {
   setBusy(true);
   try {
     const session = await apiGet(`/api/session?sessionId=${encodeURIComponent(sessionId)}`);
     state.session = unwrapSession(session);
     state.selectedSessionId = getSessionId(state.session) || sessionId;
+    state.generationMetadata = normalizeGenerationMetadata(state.session?.generation);
     await loadFrameReview(state.selectedSessionId);
-    setApiStatus("API ready", "good");
+    if (!state.generationMetadata) {
+      await hydrateGenerationMetadata();
+    }
     logActivity(`Loaded session ${state.selectedSessionId}.`);
     renderAll();
   } catch (error) {
@@ -330,12 +513,28 @@ async function loadSession(sessionId) {
   }
 }
 
+async function refreshSessionState(sessionId) {
+  const session = await apiGet(`/api/session?sessionId=${encodeURIComponent(sessionId)}`);
+  state.session = unwrapSession(session);
+  state.selectedSessionId = getSessionId(state.session) || sessionId;
+  state.generationMetadata = normalizeGenerationMetadata(state.session?.generation);
+  await loadFrameReview(state.selectedSessionId);
+  if (!state.generationMetadata) {
+    await hydrateGenerationMetadata();
+  }
+  renderAll();
+}
+
 function selectSession(sessionId, options = {}) {
   state.selectedSessionId = sessionId || "";
+  state.generationMetadata = null;
   state.frameReview = { endpointAvailable: null, items: {} };
+  resetFrameCapturePicker();
+  closeFrameInspect();
   els.sessionIdInput.value = state.selectedSessionId;
   renderSessions();
   renderSelectedSessionPill();
+  updateActionAvailability();
   if (options.load && sessionId) {
     loadSession(sessionId);
   }
@@ -375,6 +574,35 @@ async function apiPostForm(path, formData) {
     body: formData,
   });
   return parseApiResponse(response);
+}
+
+function assertCommandSucceeded(response, label) {
+  const rawCode = response?.result?.returnCode;
+  if (rawCode === undefined || rawCode === null || Number(rawCode) === 0) return;
+
+  const failure = response.failureSummary || response.failure || {};
+  const metadata = normalizeGenerationMetadata(failure);
+  const stderr = String(response?.result?.stderr || "").trim();
+  const stdout = String(response?.result?.stdout || "").trim();
+  const detail = cleanCommandFailureText(failure.errorMessage || stderr || stdout || `${label} exited with code ${rawCode}.`);
+  const usageText = formatFailureUsage(metadata);
+  throw new Error(`${label} failed: ${detail}${usageText ? ` ${usageText}` : ""}`);
+}
+
+function cleanCommandFailureText(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (text.length <= 360) return text;
+  return `${text.slice(0, 357)}...`;
+}
+
+function formatFailureUsage(metadata) {
+  if (!metadata) return "";
+  const tokens = formatNumber(metadata.totalTokens);
+  const cost = formatCost(metadata.estimatedCostUSD);
+  if (tokens && cost) return `Tokens used: ${tokens}; estimated cost: ${cost}.`;
+  if (tokens) return `Tokens used: ${tokens}.`;
+  if (cost) return `Estimated cost: ${cost}.`;
+  return "";
 }
 
 async function loadFrameReview(sessionId) {
@@ -433,10 +661,24 @@ async function addFrameCandidate(event) {
 
   const timestamp = els.addFrameTimestamp.value.trim();
   if (!timestamp) {
-    logActivity("Enter a timestamp before adding a frame candidate.", "warn");
+    openFrameCapturePicker();
+    logActivity("Use the video picker or enter a timestamp before adding a manual candidate.", "warn");
     return;
   }
 
+  await submitFrameCandidate(sessionId, timestamp);
+}
+
+async function addFrameCandidateFromVideo() {
+  const sessionId = requireSessionId();
+  if (!sessionId) return;
+
+  const timestamp = formatVideoTimestamp(els.sessionVideo.currentTime || 0);
+  els.addFrameTimestamp.value = timestamp;
+  await submitFrameCandidate(sessionId, timestamp);
+}
+
+async function submitFrameCandidate(sessionId, timestamp) {
   setBusy(true);
   try {
     const result = await apiPost("/api/extract-frame", {
@@ -453,6 +695,62 @@ async function addFrameCandidate(event) {
   } finally {
     setBusy(false);
   }
+}
+
+function openFrameCapturePicker() {
+  const sessionId = requireSessionId();
+  if (!sessionId) return;
+
+  state.frameCapturePicker.open = true;
+  state.frameCapturePicker.sessionId = sessionId;
+  renderFrameCapturePicker();
+  els.sessionVideo.focus({ preventScroll: true });
+  els.sessionVideo.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  logActivity("Frame capture picker opened. Scrub the recording and use the current time.", "info");
+}
+
+function closeFrameCapturePicker() {
+  state.frameCapturePicker.open = false;
+  els.sessionVideo.pause();
+  renderFrameCapturePicker();
+}
+
+function resetFrameCapturePicker() {
+  state.frameCapturePicker = { open: false, sessionId: "" };
+  els.sessionVideo.pause();
+  els.sessionVideo.removeAttribute("src");
+  els.sessionVideo.load();
+  els.sessionVideoTime.textContent = "Current time 0:00.000";
+}
+
+function renderFrameCapturePicker() {
+  const sessionId = state.selectedSessionId || els.sessionIdInput.value.trim();
+  const isOpen = state.frameCapturePicker.open && Boolean(sessionId);
+  els.frameCapturePicker.hidden = !isOpen;
+  if (!isOpen) return;
+
+  const src = sessionVideoUrl(sessionId);
+  if (state.frameCapturePicker.sessionId !== sessionId || els.sessionVideo.getAttribute("src") !== src) {
+    state.frameCapturePicker.sessionId = sessionId;
+    els.sessionVideo.src = src;
+    els.sessionVideo.load();
+  }
+
+  els.frameCaptureStatus.textContent = `Source recording for ${sessionId}.`;
+  updateSessionVideoTime();
+}
+
+function updateSessionVideoTime() {
+  const current = Number.isFinite(els.sessionVideo.currentTime) ? els.sessionVideo.currentTime : 0;
+  const duration = Number.isFinite(els.sessionVideo.duration) ? els.sessionVideo.duration : null;
+  const durationText = duration == null ? "" : ` of ${formatDuration(duration)}`;
+  els.sessionVideoTime.textContent = `Current time ${formatVideoTimestamp(current)}${durationText}`;
+}
+
+function handleSessionVideoError() {
+  if (!state.frameCapturePicker.open) return;
+  els.frameCaptureStatus.textContent = "Source recording could not be loaded. Enter a timestamp manually as a fallback.";
+  logActivity("Session video unavailable; manual timestamp entry is still available.", "warn");
 }
 
 async function parseApiResponse(response) {
@@ -478,6 +776,14 @@ function normalizeCollection(payload, key) {
   if (Array.isArray(payload?.[key])) return payload[key];
   if (Array.isArray(payload?.items)) return payload.items;
   return [];
+}
+
+function sortSessions(sessions) {
+  return [...sessions].sort((left, right) => {
+    const rightTime = Date.parse(right.modifiedUtc || right.createdUtc || "") || 0;
+    const leftTime = Date.parse(left.modifiedUtc || left.createdUtc || "") || 0;
+    return rightTime - leftTime || getSessionId(left).localeCompare(getSessionId(right));
+  });
 }
 
 function normalizeFrameReviewItems(payload) {
@@ -536,10 +842,30 @@ function mergeSessionResult(current, result) {
 }
 
 function renderAll() {
+  renderPages();
   renderSelectedSessionPill();
   renderSummary();
+  renderQaStatus();
   renderTabs();
   renderReadiness();
+  renderGlobalUsage();
+}
+
+function setActivePage(page) {
+  state.activePage = page === "usage" ? "usage" : "workspace";
+  renderPages();
+  if (state.activePage === "usage" && !state.usage.loading) {
+    loadUsageSummary();
+  }
+}
+
+function renderPages() {
+  const usageActive = state.activePage === "usage";
+  els.workspacePage.hidden = usageActive;
+  els.usagePage.hidden = !usageActive;
+  document.querySelectorAll("[data-page]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.page === state.activePage);
+  });
 }
 
 function renderRecordings() {
@@ -588,22 +914,39 @@ function renderTranscripts() {
 
 function renderSessions() {
   els.sessionList.innerHTML = "";
-  els.sessionCount.textContent = String(state.sessions.length);
-  if (state.sessions.length === 0) {
-    els.sessionList.innerHTML = `<li class="muted">No processed sessions yet.</li>`;
+  const sessions = filteredSessionsForSelectedRecording();
+  els.sessionCount.textContent = String(sessions.length);
+  if (!els.recordingSelect.value) {
+    els.sessionList.innerHTML = `<li class="muted">Select a recording to view its sessions.</li>`;
+    return;
+  }
+  if (sessions.length === 0) {
+    els.sessionList.innerHTML = `<li class="muted">No sessions found for the selected recording.</li>`;
     return;
   }
 
-  state.sessions.forEach((session) => {
+  sessions.forEach((session) => {
     const sessionId = getSessionId(session);
     const item = document.createElement("li");
     item.className = sessionId === state.selectedSessionId ? "selected" : "";
     item.innerHTML = `
-      <strong>${escapeHtml(sessionId || "unknown-session")}</strong>
-      <span>${escapeHtml(session.targetApplication || session.recording?.targetApplication || session.sourceName || "")}</span>
+      <button class="session-select" type="button" data-session-select="${escapeAttribute(sessionId)}">
+        <strong>${escapeHtml(sessionId || "unknown-session")}</strong>
+        <span>${escapeHtml(sessionSubtitle(session))}</span>
+      </button>
+      <button class="session-delete" type="button" data-session-delete="${escapeAttribute(sessionId)}" title="Delete this processed session and generated artifacts">Delete</button>
     `;
-    item.addEventListener("click", () => selectSession(sessionId, { load: true }));
     els.sessionList.append(item);
+  });
+}
+
+function filteredSessionsForSelectedRecording() {
+  const selectedRecording = els.recordingSelect.value;
+  if (!selectedRecording) return [];
+  const selectedName = basename(selectedRecording).toLowerCase();
+  return state.sessions.filter((session) => {
+    const source = session.sourceFile || session.sourceName || session.recording?.sourceFile || session.recording?.sourceName || "";
+    return basename(source).toLowerCase() === selectedName;
   });
 }
 
@@ -611,8 +954,23 @@ function selectRecording(recordingValue) {
   const value = getRecordingValue(recordingValue);
   if (Array.from(els.recordingSelect.options).some((option) => option.value === value)) {
     els.recordingSelect.value = value;
-    syncSessionIdPlaceholder();
+    handleRecordingSelectionChange();
   }
+}
+
+function handleRecordingSelectionChange() {
+  syncSessionIdPlaceholder();
+  if (state.selectedSessionId && !filteredSessionsForSelectedRecording().some((session) => getSessionId(session) === state.selectedSessionId)) {
+    state.selectedSessionId = "";
+    state.session = null;
+    state.generationMetadata = null;
+    state.frameReview = { endpointAvailable: null, items: {} };
+    resetFrameCapturePicker();
+    closeFrameInspect();
+    els.sessionIdInput.value = "";
+  }
+  renderSessions();
+  renderAll();
 }
 
 function renderSelectedSessionPill() {
@@ -628,13 +986,39 @@ function renderSelectedSessionPill() {
 function renderSummary() {
   const trace = getTrace();
   const segments = getSegments();
-  const images = segments.flatMap((segment) => segment.candidateImages || []);
+  const images = getFrameCandidates();
   const reviewCount = segments.filter((segment) => segment.confidence?.needsHumanReview).length;
 
   els.durationMetric.textContent = formatDuration(trace?.recording?.durationSeconds);
   els.segmentMetric.textContent = segments.length ? String(segments.length) : "--";
   els.reviewMetric.textContent = segments.length ? String(reviewCount) : "--";
   els.imageMetric.textContent = images.length ? String(images.length) : "--";
+}
+
+function renderQaStatus() {
+  const status = state.session?.qa?.status || "";
+  if (status === "publish-ready") {
+    els.qaStatusTitle.textContent = "QA Passed";
+    els.qaStatusText.textContent = "Local checks passed. Download is ready for reviewer handoff.";
+    return;
+  }
+  if (status === "review-only") {
+    els.qaStatusTitle.textContent = "QA Needs Review";
+    els.qaStatusText.textContent = "The guide built successfully, but reviewer comments or warnings need attention.";
+    return;
+  }
+  if (status === "failed") {
+    els.qaStatusTitle.textContent = "QA Failed";
+    els.qaStatusText.textContent = "Local checks found blockers. Review Latest Activity before sharing.";
+    return;
+  }
+  if (getArtifacts().some((artifact) => /user_guide.*\.docx$/i.test(artifact.name || artifact.path || ""))) {
+    els.qaStatusTitle.textContent = "QA Not Run";
+    els.qaStatusText.textContent = "Create Guide runs QA automatically. Re-run QA after manual guide or screenshot changes.";
+    return;
+  }
+  els.qaStatusTitle.textContent = "QA Status";
+  els.qaStatusText.textContent = "Create Guide will run local QA after the DOCX is built.";
 }
 
 function renderTabs() {
@@ -646,6 +1030,7 @@ function renderTabs() {
   renderTrace();
   renderFrames();
   renderArtifacts();
+  renderUsage();
   renderJson();
 }
 
@@ -680,6 +1065,8 @@ function renderTrace() {
 function renderFrames() {
   const frames = getFrameCandidates();
   renderAddFrameSegments();
+  renderFrameCapturePicker();
+  renderFrameInspect();
   updateFrameReviewStatus();
   if (frames.length === 0) {
     els.frameGrid.className = "frame-grid empty-state";
@@ -698,7 +1085,9 @@ function renderFrames() {
     const path = frame.path || "";
     const confidence = frame.confidence ?? frame.score;
     card.innerHTML = `
-      <div class="frame-preview">${path ? `<img src="${escapeAttribute(frameUrl(path))}" alt="Candidate frame ${escapeAttribute(frame.frameId || frame.id || "")}">` : `<span>No image</span>`}</div>
+      <button class="frame-preview" type="button" data-frame-inspect="${escapeAttribute(frameId)}" aria-label="Inspect candidate frame ${escapeAttribute(frame.frameId || frame.id || frameId || "")}">
+        ${path ? `<img src="${escapeAttribute(frameUrl(path))}" alt="Candidate frame ${escapeAttribute(frame.frameId || frame.id || "")}">` : `<span>No image</span>`}
+      </button>
       <header class="frame-card-header">
         <strong>${escapeHtml(frame.frameId || frame.id || frameId || "frame")}</strong>
         <small>${escapeHtml(review.reviewStatus)} · ${formatPercent(confidence)}</small>
@@ -723,8 +1112,20 @@ function renderFrames() {
 }
 
 function handleFrameAction(event) {
+  const inspectButton = event.target.closest("[data-frame-inspect]");
+  if (inspectButton) {
+    openFrameInspect(inspectButton.dataset.frameInspect);
+    return;
+  }
+
   const button = event.target.closest("[data-frame-action]");
-  if (!button) return;
+  if (!button) {
+    const card = event.target.closest(".frame-card");
+    if (card && !isInteractiveFrameTarget(event.target)) {
+      openFrameInspect(card.dataset.frameId);
+    }
+    return;
+  }
   const card = button.closest(".frame-card");
   const frameId = card?.dataset.frameId;
   if (!frameId) return;
@@ -732,6 +1133,71 @@ function handleFrameAction(event) {
   updateLocalFrameReview(frameId, { reviewStatus: button.dataset.frameAction });
   renderFrames();
   saveFrameReview(frameId);
+}
+
+function isInteractiveFrameTarget(target) {
+  return Boolean(target.closest("button, a, input, select, textarea, label"));
+}
+
+function openFrameInspect(frameId) {
+  const frame = getFrameCandidates().find((candidate) => getFrameId(candidate) === frameId);
+  if (!frame) return;
+  state.frameInspect = { open: true, frameId };
+  renderFrameInspect();
+}
+
+function closeFrameInspect() {
+  state.frameInspect = { open: false, frameId: "" };
+  renderFrameInspect();
+}
+
+function handleFrameInspectBackdrop(event) {
+  if (event.target === els.frameInspectModal) {
+    closeFrameInspect();
+  }
+}
+
+function handleGlobalKeydown(event) {
+  if (event.key === "Escape" && state.frameInspect.open) {
+    closeFrameInspect();
+  }
+}
+
+function renderFrameInspect() {
+  const frame = getFrameCandidates().find((candidate) => getFrameId(candidate) === state.frameInspect.frameId);
+  const isOpen = state.frameInspect.open && Boolean(frame);
+  els.frameInspectModal.hidden = !isOpen;
+  document.body.classList.toggle("modal-open", isOpen);
+  if (!isOpen || !frame) {
+    els.frameInspectImage.removeAttribute("src");
+    els.frameInspectImage.alt = "";
+    return;
+  }
+
+  const review = getFrameReview(frame);
+  const frameId = getFrameId(frame);
+  const path = frame.path || "";
+  const confidence = frame.confidence ?? frame.score;
+  els.frameInspectTitle.textContent = frame.frameId || frame.id || frameId || "Frame Preview";
+  els.frameInspectMeta.textContent = `${review.reviewStatus || "pending"} · ${frame.timestamp || "unknown time"} · ${formatPercent(confidence)}`;
+  if (path) {
+    els.frameInspectImage.src = frameUrl(path);
+    els.frameInspectImage.alt = `Candidate frame ${frame.frameId || frame.id || frameId}`;
+  } else {
+    els.frameInspectImage.removeAttribute("src");
+    els.frameInspectImage.alt = "No frame image available.";
+  }
+  els.frameInspectDetails.innerHTML = `
+    <dl>
+      <div><dt>Frame</dt><dd>${escapeHtml(frameId)}</dd></div>
+      <div><dt>Timestamp</dt><dd>${escapeHtml(frame.timestamp || "--")}</dd></div>
+      <div><dt>Status</dt><dd>${escapeHtml(review.reviewStatus || "pending")}</dd></div>
+      <div><dt>Assigned Segment</dt><dd>${escapeHtml(review.assignedSegmentId || frame.segmentId || "No assignment")}</dd></div>
+      <div><dt>Selection Reason</dt><dd>${escapeHtml(frame.reason || frame.selectionReason || "--")}</dd></div>
+      <div><dt>Review Note</dt><dd>${escapeHtml(review.reviewNote || "No reviewer note.")}</dd></div>
+    </dl>
+  `;
+  els.closeFrameInspect.focus({ preventScroll: true });
 }
 
 function handleFrameFieldChange(event) {
@@ -760,6 +1226,9 @@ function updateLocalFrameReview(frameId, patch) {
     ...(state.frameReview.items[frameId] || {}),
     ...patch,
   };
+  if (state.frameInspect.open && state.frameInspect.frameId === frameId) {
+    renderFrameInspect();
+  }
 }
 
 function getFrameCandidates() {
@@ -832,6 +1301,7 @@ function updateFrameReviewStatus(message = "") {
 
 function renderArtifacts() {
   const artifacts = getArtifacts();
+  renderGenerationMetadata();
   if (artifacts.length === 0) {
     els.artifactList.className = "artifact-list empty-state";
     els.artifactList.textContent = "Generated draft, DOCX, and QA artifacts will appear here.";
@@ -842,12 +1312,132 @@ function renderArtifacts() {
   els.artifactList.innerHTML = "";
   artifacts.forEach((artifact) => {
     const item = document.createElement("article");
+    const downloadUrl = artifactDownloadUrl(artifact);
+    const downloadLink = downloadUrl
+      ? `<a class="artifact-download" href="${escapeAttribute(downloadUrl)}" download>Download</a>`
+      : "";
     item.innerHTML = `
-      <strong>${escapeHtml(artifact.label)}</strong>
+      <div class="artifact-row">
+        <strong>${escapeHtml(artifact.label)}</strong>
+        ${downloadLink}
+      </div>
       <span>${escapeHtml(artifact.path || artifact.status || "")}</span>
     `;
     els.artifactList.append(item);
   });
+}
+
+function renderGenerationMetadata() {
+  const metadata = state.generationMetadata;
+  if (!metadata) {
+    els.generationMetadata.className = "generation-metadata empty-state";
+    els.generationMetadata.textContent = "Generation usage will appear after the Anthropic draft is available.";
+    return;
+  }
+
+  els.generationMetadata.className = "generation-metadata";
+  els.generationMetadata.innerHTML = `
+    <div>
+      <span class="metric-label">Model</span>
+      <strong>${escapeHtml(metadata.model || "Unknown")}</strong>
+    </div>
+    <div>
+      <span class="metric-label">Generated</span>
+      <strong>${escapeHtml(formatDateTime(metadata.generatedAt) || metadata.generatedAt || "--")}</strong>
+    </div>
+    <div>
+      <span class="metric-label">Tokens</span>
+      <strong>${escapeHtml(formatNumber(metadata.totalTokens) || "--")}</strong>
+      <small>${escapeHtml(formatNumber(metadata.inputTokens) || "--")} in / ${escapeHtml(formatNumber(metadata.outputTokens) || "--")} out</small>
+    </div>
+    <div>
+      <span class="metric-label">Estimated Cost</span>
+      <strong>${escapeHtml(formatCost(metadata.estimatedCostUSD) || "--")}</strong>
+    </div>
+  `;
+}
+
+function renderUsage() {
+  if (!els.usageBreakdown) return;
+  renderGlobalUsage();
+
+  document.querySelectorAll("[data-usage-range]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.usageRange === state.usage.range);
+    button.disabled = state.usage.loading;
+  });
+
+  const summary = state.usage.summary;
+  const totals = summary?.totals || {};
+  els.usageDocumentMetric.textContent = formatNumber(totals.documents) || "--";
+  els.usageTokenMetric.textContent = formatNumber(totals.totalTokens) || "--";
+  els.usageInOutMetric.textContent = `${formatNumber(totals.inputTokens) || "--"} / ${formatNumber(totals.outputTokens) || "--"}`;
+  els.usageCostMetric.textContent = formatCost(totals.estimatedCostUSD) || "--";
+
+  if (state.usage.loading) {
+    els.usageStatus.textContent = `Loading ${state.usage.range} usage...`;
+    els.usageBreakdown.className = "usage-breakdown empty-state";
+    els.usageBreakdown.textContent = "Loading generation usage totals.";
+    return;
+  }
+
+  if (state.usage.error) {
+    els.usageStatus.textContent = "Usage API unavailable.";
+    els.usageBreakdown.className = "usage-breakdown empty-state";
+    els.usageBreakdown.textContent = "Usage totals will appear after /api/usage-summary is available.";
+    return;
+  }
+
+  if (!summary) {
+    els.usageStatus.textContent = "Token usage totals load from the local API.";
+    els.usageBreakdown.className = "usage-breakdown empty-state";
+    els.usageBreakdown.textContent = "Select a range to load usage totals.";
+    return;
+  }
+
+  const failedText = Number(totals.failedAttempts)
+    ? ` Includes ${formatNumber(totals.failedAttempts)} failed AI attempt${Number(totals.failedAttempts) === 1 ? "" : "s"}.`
+    : "";
+  els.usageStatus.textContent = `${rangeLabel(summary.range)} totals generated ${formatDateTime(summary.generatedAt) || "now"}.${failedText}`;
+  const buckets = Array.isArray(summary.buckets) ? summary.buckets : [];
+  if (buckets.length === 0) {
+    els.usageBreakdown.className = "usage-breakdown empty-state";
+    els.usageBreakdown.textContent = "No generated documents found for this range.";
+    return;
+  }
+
+  els.usageBreakdown.className = "usage-breakdown";
+  els.usageBreakdown.innerHTML = "";
+  buckets.forEach((bucket) => {
+    const bucketTotals = normalizeUsageTotals(bucket.totals || bucket);
+    const item = document.createElement("article");
+    item.innerHTML = `
+      <div>
+        <strong>${escapeHtml(formatUsageBucket(bucket))}</strong>
+        <span>${escapeHtml(formatUsageBucketAttempts(bucketTotals))}</span>
+      </div>
+      <div>
+        <span>${escapeHtml(formatNumber(bucketTotals.totalTokens) || "0")} tokens</span>
+        <strong>${escapeHtml(formatCost(bucketTotals.estimatedCostUSD) || "$0.0000")}</strong>
+      </div>
+    `;
+    els.usageBreakdown.append(item);
+  });
+}
+
+function renderGlobalUsage() {
+  const totals = state.usage.currentMonthSummary?.totals || {};
+  const documents = formatNumber(totals.documents);
+  const cost = formatCost(totals.estimatedCostUSD);
+  if (state.usage.currentMonthLoading && !state.usage.currentMonthSummary) {
+    els.globalUsageMetric.textContent = "Loading";
+    return;
+  }
+  if (documents || cost) {
+    const failed = Number(totals.failedAttempts) ? ` · ${formatNumber(totals.failedAttempts)} failed` : "";
+    els.globalUsageMetric.textContent = `${documents || "0"} docs · ${cost || "$0.0000"}${failed}`;
+    return;
+  }
+  els.globalUsageMetric.textContent = "No spend";
 }
 
 function renderJson() {
@@ -885,11 +1475,17 @@ function renderReadiness() {
 function buildReadinessChecks(trace, segments) {
   const reviewCount = segments.filter((segment) => segment.confidence?.needsHumanReview).length;
   const placeholderCount = segments.filter((segment) => /prototype narration|placeholder/i.test(segment.speakerText || "")).length;
-  const imageCount = segments.flatMap((segment) => segment.candidateImages || []).length;
-  const createdImages = segments.flatMap((segment) => segment.candidateImages || []).filter((image) => image.created).length;
+  const frames = getFrameCandidates();
+  const imageCount = frames.length;
+  const reviewedFrames = frames.map(getFrameReview);
+  const approvedImages = reviewedFrames.filter((image) => image.reviewStatus === "approved").length;
+  const rejectedImages = reviewedFrames.filter((image) => image.reviewStatus === "rejected").length;
+  const pendingImages = Math.max(0, imageCount - approvedImages - rejectedImages);
+  const createdImages = frames.filter((image) => image.created).length;
   const lowConfidence = segments.filter((segment) => Number(segment.confidence?.overall || 0) < 0.75).length;
+  const generation = state.generationMetadata;
 
-  return [
+  const checks = [
     {
       label: "Trace loaded",
       state: trace.schemaVersion === 1 ? "good" : "bad",
@@ -906,11 +1502,24 @@ function buildReadinessChecks(trace, segments) {
       detail: reviewCount ? `${reviewCount} segments are flagged for review.` : "No segment review flags detected.",
     },
     {
-      label: "Candidate images",
+      label: "Screenshot review",
+      state: imageCount === 0 ? "bad" : pendingImages ? "warn" : approvedImages ? "good" : "warn",
+      detail: `${approvedImages} approved, ${rejectedImages} rejected, ${pendingImages} pending from ${imageCount} candidates.`,
+    },
+    {
+      label: "Extracted images",
       state: imageCount === 0 ? "bad" : createdImages === 0 ? "warn" : "good",
-      detail: `${imageCount} candidates, ${createdImages} extracted image files.`,
+      detail: `${createdImages} extracted image files available for review.`,
     },
   ];
+  if (generation) {
+    checks.push({
+      label: "Generation usage",
+      state: "good",
+      detail: `${formatNumber(generation.totalTokens) || "--"} tokens, ${formatCost(generation.estimatedCostUSD) || "cost unavailable"}, ${generation.model || "model unavailable"}.`,
+    });
+  }
+  return checks;
 }
 
 function getTrace() {
@@ -935,6 +1544,142 @@ function getArtifacts() {
     session.generated.forEach((file) => artifacts.push({ label: file.name || "Generated file", path: file.relativePath || "" }));
   }
   return artifacts;
+}
+
+async function hydrateGenerationMetadata() {
+  if (state.generationMetadata) return;
+  const draftArtifact = getArtifacts().find((artifact) => /guide_draft.*\.json$/i.test(artifact.name || artifact.path || ""));
+  const sessionId = state.selectedSessionId || getSessionId(state.session);
+  if (!draftArtifact || !sessionId) return;
+
+  const url = artifactDownloadUrl(draftArtifact);
+  if (!url) return;
+  try {
+    const response = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!response.ok) return;
+    const draft = await response.json();
+    state.generationMetadata = normalizeGenerationMetadata(draft);
+  } catch {
+    state.generationMetadata = null;
+  }
+}
+
+function normalizeGenerationMetadata(draft) {
+  const guideDraft = draft?.guideDraft && typeof draft.guideDraft === "object" ? draft.guideDraft : {};
+  const usage = firstObject(draft?.usage, guideDraft.usage);
+  const generation = firstObject(draft?.generation, guideDraft.generation);
+  const model = modelName(draft?.model) || modelName(generation?.model) || modelName(guideDraft?.model);
+  const inputTokens = numberValue(
+    usage?.inputTokens
+      ?? usage?.input_tokens
+      ?? usage?.cacheReadInputTokens
+      ?? usage?.cache_read_input_tokens
+      ?? draft?.inputTokens
+      ?? draft?.input_tokens
+  );
+  const outputTokens = numberValue(usage?.outputTokens ?? usage?.output_tokens ?? draft?.outputTokens ?? draft?.output_tokens);
+  const totalTokens = numberValue(usage?.totalTokens ?? usage?.total_tokens ?? draft?.totalTokens ?? draft?.total_tokens) ?? (
+    Number.isFinite(inputTokens) || Number.isFinite(outputTokens)
+      ? Number(inputTokens || 0) + Number(outputTokens || 0)
+      : null
+  );
+  const estimatedCostUSD = numberValue(
+    usage?.estimatedCostUSD
+      ?? usage?.estimated_cost_usd
+      ?? usage?.costUSD
+      ?? usage?.cost_usd
+      ?? generation?.estimatedCostUSD
+      ?? generation?.estimated_cost_usd
+      ?? generation?.costUSD
+      ?? generation?.cost_usd
+      ?? draft?.estimatedCostUSD
+      ?? draft?.estimated_cost_usd
+      ?? draft?.costUSD
+      ?? draft?.cost_usd
+  );
+  const generatedAt = draft?.generatedAt || draft?.generated_at || draft?.createdUtc || draft?.createdAt
+    || generation?.generatedAt || generation?.generated_at || generation?.createdUtc || generation?.createdAt
+    || guideDraft?.generatedAt || guideDraft?.generated_at || "";
+
+  if (!model && !generatedAt && !Number.isFinite(totalTokens) && !Number.isFinite(estimatedCostUSD)) {
+    return null;
+  }
+  return { model, generatedAt, inputTokens, outputTokens, totalTokens, estimatedCostUSD };
+}
+
+function normalizeUsageSummary(payload, fallbackRange) {
+  const totals = normalizeUsageTotals(payload?.totals || {});
+  const bucketSource = Array.isArray(payload?.buckets) ? payload.buckets : Array.isArray(payload?.days) ? payload.days : [];
+  const buckets = bucketSource.map((bucket) => ({
+    ...bucket,
+    totals: normalizeUsageTotals(bucket.totals || bucket),
+  }));
+  return {
+    range: payload?.range || fallbackRange,
+    generatedAt: payload?.generatedAt || payload?.generated_at || payload?.createdUtc || payload?.createdAt || "",
+    totals,
+    buckets,
+    days: buckets,
+  };
+}
+
+function normalizeUsageTotals(totals) {
+  const inputTokens = numberValue(totals?.inputTokens ?? totals?.input_tokens);
+  const outputTokens = numberValue(totals?.outputTokens ?? totals?.output_tokens);
+  const totalTokens = numberValue(totals?.totalTokens ?? totals?.total_tokens) ?? (
+    Number.isFinite(inputTokens) || Number.isFinite(outputTokens)
+      ? Number(inputTokens || 0) + Number(outputTokens || 0)
+      : null
+  );
+  return {
+    documents: numberValue(totals?.documents ?? totals?.documentCount ?? totals?.generatedDocuments ?? totals?.count),
+    attempts: numberValue(totals?.attempts ?? totals?.attemptCount),
+    failedAttempts: numberValue(totals?.failedAttempts ?? totals?.failed_attempts ?? totals?.failedAttemptCount),
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    estimatedCostUSD: numberValue(totals?.estimatedCostUSD ?? totals?.estimated_cost_usd ?? totals?.costUSD ?? totals?.cost_usd),
+  };
+}
+
+function formatUsageBucketAttempts(totals) {
+  const documents = Number(totals.documents || 0);
+  const attempts = Number(totals.attempts || documents || 0);
+  const failed = Number(totals.failedAttempts || 0);
+  const parts = [
+    `${formatNumber(documents) || "0"} document${documents === 1 ? "" : "s"}`,
+    `${formatNumber(attempts) || "0"} AI attempt${attempts === 1 ? "" : "s"}`,
+  ];
+  if (failed) {
+    parts.push(`${formatNumber(failed)} failed`);
+  }
+  return parts.join(" · ");
+}
+
+function firstObject(...values) {
+  return values.find((value) => value && typeof value === "object" && !Array.isArray(value)) || {};
+}
+
+function modelName(value) {
+  if (!value) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "object") return value.id || value.name || value.model || value.modelId || value.provider || "";
+  return String(value);
+}
+
+function numberValue(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(String(value).replace(/[$,]/g, ""));
+  return Number.isFinite(number) ? number : null;
+}
+
+function artifactDownloadUrl(artifact) {
+  const sessionId = state.selectedSessionId || getSessionId(state.session);
+  if (!sessionId) return "";
+  const path = artifact.path || artifact.relativePath || "";
+  const name = artifact.name || path.split("/").pop() || "";
+  if (!name || !/\.(docx|json)$/i.test(name)) return "";
+  return `/api/session?sessionId=${encodeURIComponent(sessionId)}&asset=${encodeURIComponent(name)}`;
 }
 
 function getRecordingLabel(recording) {
@@ -974,6 +1719,14 @@ function getSessionId(session) {
   return session?.sessionId || session?.id || session?.name || "";
 }
 
+function sessionSubtitle(session) {
+  const app = session.targetApplication || session.recording?.targetApplication || session.sourceName || "Unknown application";
+  const source = session.sourceName || basename(session.sourceFile || session.recording?.sourceFile || "");
+  const modified = formatDateTime(session.modifiedUtc || session.createdUtc);
+  const parts = [app, source, modified].filter(Boolean);
+  return parts.join(" · ");
+}
+
 function syncSessionIdPlaceholder() {
   const recording = els.recordingSelect.value;
   const base = recording.split("/").pop()?.replace(/\.[^.]+$/, "") || "recording";
@@ -981,11 +1734,27 @@ function syncSessionIdPlaceholder() {
   if (/teams|meeting recording/i.test(recording)) {
     els.sourceProfile.value = "teams-recording";
   }
+  updateActionAvailability();
+}
+
+function basename(value) {
+  return String(value || "").split(/[\\/]/).pop() || "";
 }
 
 function frameUrl(path) {
   const sessionId = state.selectedSessionId || getSessionId(state.session);
   return `/api/session?sessionId=${encodeURIComponent(sessionId)}&asset=${encodeURIComponent(path)}`;
+}
+
+function sessionVideoUrl(sessionId) {
+  return `/api/session-video?sessionId=${encodeURIComponent(sessionId)}`;
+}
+
+function formatVideoTimestamp(seconds) {
+  const safeSeconds = Math.max(0, Number(seconds) || 0);
+  const minutes = Math.floor(safeSeconds / 60);
+  const remainingSeconds = safeSeconds - minutes * 60;
+  return `${minutes}:${remainingSeconds.toFixed(3).padStart(6, "0")}`;
 }
 
 function formatDuration(seconds) {
@@ -1002,6 +1771,35 @@ function formatPercent(value) {
   return `${Math.round(Number(value) * 100)}%`;
 }
 
+function formatDateTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function formatUsageBucket(bucket) {
+  const value = bucket.day || bucket.date || bucket.generatedAt || bucket.generated_at || bucket.start || bucket.label;
+  if (!value) return "Unknown date";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+}
+
+function rangeLabel(range) {
+  return ({ day: "Daily", week: "Weekly", month: "Monthly", year: "Yearly" })[range] || "Usage";
+}
+
+function formatNumber(value) {
+  if (!Number.isFinite(Number(value))) return "";
+  return Number(value).toLocaleString();
+}
+
+function formatCost(value) {
+  if (!Number.isFinite(Number(value))) return "";
+  return `$${Number(value).toFixed(4)}`;
+}
+
 function renderTags(values, className = "") {
   return values.slice(0, 8).map((value) => `<span class="tag ${className}">${escapeHtml(value)}</span>`).join("");
 }
@@ -1011,45 +1809,69 @@ function renderReasons(reasons = []) {
   return `<ul class="reason-list">${reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul>`;
 }
 
-function setApiStatus(text, stateName) {
-  els.apiStatus.textContent = text;
-  els.apiStatus.className = `status-pill ${stateName}`;
+function setBusy(isBusy) {
+  state.busy = isBusy;
+  document.body.classList.toggle("busy", isBusy);
+  renderOperationStatus();
+  updateActionAvailability();
 }
 
-function setToolStatus(health) {
-  const ffmpeg = Boolean(health?.tools?.ffmpeg?.available);
-  const ffprobe = Boolean(health?.tools?.ffprobe?.available);
-  const whisper = Boolean(health?.tools?.whisper?.available);
-  const whisperModel = Boolean(health?.tools?.whisper?.modelAvailable);
-  if (ffmpeg && ffprobe && whisper && whisperModel) {
-    els.toolStatus.textContent = "Local pipeline ready";
-    els.toolStatus.className = "status-pill good";
-  } else if (ffmpeg && ffprobe) {
-    els.toolStatus.textContent = "Media ready, STT missing";
-    els.toolStatus.className = "status-pill warn";
-  } else {
-    els.toolStatus.textContent = "Media tools missing";
-    els.toolStatus.className = "status-pill warn";
+function setOperation(message, messages = []) {
+  stopOperationMessageRotation();
+  state.operationMessage = message || "";
+  state.operationMessages = Array.isArray(messages) ? messages.filter(Boolean) : [];
+  state.operationMessageIndex = 0;
+  renderOperationStatus();
+  if (state.operationMessages.length > 0) {
+    state.operationTimer = window.setInterval(() => {
+      if (!state.operationMessages.length) return;
+      state.operationMessageIndex = (state.operationMessageIndex + 1) % state.operationMessages.length;
+      state.operationMessage = state.operationMessages[state.operationMessageIndex];
+      renderOperationStatus();
+    }, 4500);
   }
 }
 
-function setBusy(isBusy) {
-  state.busy = isBusy;
-  [
-    els.refreshAll,
-    els.importRecordingButton,
-    els.importTranscriptButton,
-    els.processButton,
-    els.deterministicDraftButton,
-    els.anthropicDraftButton,
-    els.buildDocxButton,
-    els.qaDocxButton,
-    els.reloadSession,
-    els.addFrameButton,
-  ].forEach((button) => {
-    button.disabled = isBusy;
+function stopOperationMessageRotation() {
+  if (state.operationTimer) {
+    window.clearInterval(state.operationTimer);
+    state.operationTimer = null;
+  }
+}
+
+function renderOperationStatus() {
+  const visible = Boolean(state.operationMessage);
+  els.operationStatus.hidden = !visible;
+  els.operationStatusText.textContent = state.operationMessage || "";
+}
+
+function updateActionAvailability() {
+  const hasRecording = Boolean(els.recordingSelect.value);
+  const hasSession = Boolean(state.selectedSessionId || els.sessionIdInput.value.trim());
+  const hasLoadedSession = Boolean(state.session);
+  const artifacts = getArtifacts();
+  const hasDocx = artifacts.some((artifact) => /user_guide.*\.docx$/i.test(artifact.name || artifact.path || ""));
+
+  els.refreshAll.disabled = state.busy;
+  els.importRecordingButton.disabled = state.busy;
+  els.importTranscriptButton.disabled = state.busy;
+  els.processButton.disabled = state.busy || !hasRecording;
+  els.generateDraftButton.disabled = state.busy || !hasSession;
+  els.buildDocxButton.disabled = state.busy || !hasDocx;
+  els.qaDocxButton.disabled = state.busy || !hasSession || !hasDocx;
+  els.reloadSession.disabled = state.busy || !hasSession;
+  els.clearSession.disabled = state.busy || !hasSession;
+  els.sessionList.querySelectorAll("[data-session-delete]").forEach((button) => {
+    button.disabled = state.busy;
   });
-  document.body.classList.toggle("busy", isBusy);
+  els.addFrameButton.disabled = state.busy || !hasLoadedSession;
+  els.addFrameTimestampButton.disabled = state.busy || !hasLoadedSession;
+  els.useVideoTimeButton.disabled = state.busy || !hasLoadedSession;
+
+  els.processButton.title = hasRecording ? "Process the selected recording into a local trace." : "Select a recording first.";
+  els.generateDraftButton.title = hasSession ? "Create the AI guide, build the DOCX, and run local QA." : "Select or process a session first.";
+  els.buildDocxButton.title = hasDocx ? "Download the latest generated DOCX." : "Create a guide first.";
+  els.qaDocxButton.title = hasDocx ? "Re-run local QA checks without using AI tokens." : "Create a guide first.";
 }
 
 function logActivity(message, level = "info") {
