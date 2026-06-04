@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "defaults": {
+    "recordingDurationMinutes": 60,
+    "captureMode": "imported-recording",
+    "outputFormat": "docx"
+  },
+  "scenarios": [
+    {
+      "id": "guide-basic-navigation",
+      "status": "planned",
+      "recordingProfile": "one-hour narrated application walkthrough",
+      "expectedWorkflow": "Navigate to a module and explain the main workspace",
+      "requiredSections": ["Purpose", "Workflow Overview", "Step-by-Step Procedures", "Expected Results"],
+      "requiredUiTerms": ["Home", "Navigation", "Search"],
+      "forbiddenEchoes": ["OPENAI_API_KEY", "system prompt"],
+      "qualityChecks": ["preserve exact UI labels", "select stills near speaker intent", "avoid duplicate screenshots"]
+    },
+    {
+      "id": "guide-form-entry",
+      "status": "planned",
+      "recordingProfile": "one-hour training recording with form entry and save confirmation",
+      "expectedWorkflow": "Complete and save a form",
+      "requiredSections": ["Prerequisites", "Step-by-Step Procedures", "Expected Results", "Troubleshooting"],
+      "requiredUiTerms": ["New", "Save", "Required"],
+      "forbiddenEchoes": ["Authorization: Bearer", "developer message"],
+      "qualityChecks": ["capture empty and completed form states", "separate assumptions from confirmed steps"]
+    },
+    {
+      "id": "guide-search-filter",
+      "status": "planned",
+      "recordingProfile": "one-hour walkthrough with search, filtering, and results review",
+      "expectedWorkflow": "Search for a record and refine results",
+      "requiredSections": ["Purpose", "Workflow Overview", "Step-by-Step Procedures", "Expected Results"],
+      "requiredUiTerms": ["Search", "Filter", "Results"],
+      "forbiddenEchoes": ["chain-of-thought", "DamienDev"],
+      "qualityChecks": ["keep query examples generic", "avoid sensitive record values"]
+    },
+    {
+      "id": "guide-admin-settings",
+      "status": "planned",
+      "recordingProfile": "one-hour administrative workflow recording",
+      "expectedWorkflow": "Review and update administrative settings",
+      "requiredSections": ["Intended Audience", "Prerequisites", "Step-by-Step Procedures", "Troubleshooting"],
+      "requiredUiTerms": ["Settings", "Users", "Permissions"],
+      "forbiddenEchoes": ["SmartReq", "<environment_context>"],
+      "qualityChecks": ["identify admin-only audience", "call out permission prerequisites"]
+    },
+    {
+      "id": "guide-error-recovery",
+      "status": "planned",
+      "recordingProfile": "one-hour walkthrough with validation errors and recovery steps",
+      "expectedWorkflow": "Recover from a validation or workflow error",
+      "requiredSections": ["Purpose", "Step-by-Step Procedures", "Troubleshooting", "Expected Results"],
+      "requiredUiTerms": ["Error", "Cancel", "Retry"],
+      "forbiddenEchoes": ["raw JSON", "OPENAI_API_KEY"],
+      "qualityChecks": ["include expected result after recovery", "avoid presenting errors as normal flow"]
+    }
+  ]
+}
+

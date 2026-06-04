@@ -1,0 +1,11 @@
+{
+  "name": "kcxdocumentor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "eval:validate": "node tests/evals/validate-fixtures.mjs",
+    "eval:offline": "node tests/evals/run-offline-fixture-evals.mjs"
+  }
+}
+
