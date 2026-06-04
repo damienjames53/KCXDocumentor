@@ -18,9 +18,10 @@ The MVP consumes pre-recorded files rather than recording the screen itself.
 6. OCR candidate frames locally.
 7. Align transcript segments, UI text, and frame timestamps.
 8. Produce `procedure_trace.json`.
-9. Ask Anthropic Claude Sonnet 4.6 to create a structured guide draft from the trace.
-10. Render the final guide as DOCX using the local keycentrix document assets.
-11. Run deterministic artifact QA before the guide is considered usable.
+9. Review candidate screenshots and transcript risk before any publishable AI draft is generated.
+10. Ask Anthropic Claude Sonnet 4.6 to create a structured guide draft from the reviewed trace.
+11. Render the final guide as DOCX using the local keycentrix document assets.
+12. Run deterministic artifact QA and rendered visual QA before the guide is considered usable.
 
 The initial testing surface is a local web console served by the Python stdlib app server. This is a prototype and review surface, not the final product shell. If KCXDocumentor becomes a full web client, thick Windows client, or hybrid desktop app, its visual language should continue to follow the `CustomerAppUI` reference standard.
 
@@ -120,11 +121,52 @@ After the importer works, add native Windows recording.
 
 ## Human Review Step
 
-Add a lightweight review surface before AI guide generation. The review surface should show transcript segments, confidence scores, review reasons, candidate frames, OCR text, approve/reject/swap controls for still images, and reviewer notes for missing or ambiguous context.
+Add a lightweight review surface before customer-facing AI guide generation. The review surface should show transcript segments, confidence scores, review reasons, candidate frames, OCR text, approve/reject/swap controls for still images, and reviewer notes for missing or ambiguous context.
 
-This can start as a local web page that reads `procedure_trace.json` and writes review decisions back into the trace.
+This starts as a local web page that reads the processed session bundle and writes reviewer decisions to `frame_review.json` as an overlay. It should not rewrite the raw extraction outputs.
 
 The review surface should use the CustomerAppUI visual standard even during the prototype stage so the workflow can graduate into either a web client or Windows client without rethinking the product ergonomics.
+
+The current Blink Rx test showed that Anthropic can produce better procedure prose than the deterministic fallback, but the generated DOCX is not customer-ready unless the reviewer concerns are handled correctly. Reviewer concerns such as unclear transcript stretches, screenshot approval, UI evidence, source timing, placeholder OCR, and confidence issues must appear in Word comments or reviewer-only fallback sections, not in the visible guide body.
+
+## Current Test Fixture
+
+Use `Blink Rx Training Part 2 120525.mp4` as the primary optimization fixture until the first demo guide is acceptable.
+
+Canonical processing lanes:
+
+- `blink-rx-part-2-sidecar`: uses the Teams-generated `.vtt` transcript as the reference STT.
+- `blink-rx-part-2-whisper`: uses only the MP4 with local `whisper.cpp` transcription.
+
+Required comparison:
+
+- Run Teams STT versus local Whisper comparison with `npm run blink:compare:stt`.
+- Track approximate WER, vocabulary overlap, average aligned-segment similarity, and low-similarity examples.
+- Treat the comparison as a product-quality signal, not an academic transcript benchmark.
+
+Current observed baseline for the regenerated Blink Rx lanes:
+
+- Teams STT reference word count: 1,314.
+- Local Whisper word count: 1,266.
+- Approximate WER against Teams STT: 17.73%.
+- Word overlap: 78.53%.
+- Word sequence similarity: 84.03%.
+- Local Whisper low-confidence segments: 4.
+
+## Publishable Guide Gate
+
+A generated DOCX is not customer-ready just because it exists or passes normal QA. The gate for a customer-facing artifact is:
+
+- Anthropic draft generated from one of the current canonical Blink Rx sessions, not stale pre-fix traces.
+- Frame review completed before final generation or DOCX build.
+- Approved screenshots embedded in the DOCX; rejected screenshots excluded.
+- No visible AI thought process, prompt text, raw JSON, placeholder confidence text, or internal QA language in the guide body.
+- Reviewer concerns are Word comments, not visible tags or body paragraphs.
+- Strict artifact QA passes.
+- Rendered DOCX visual QA passes after screenshots are embedded.
+- The visible body reads like a user guide with actionable second-person procedure steps, not a transcript summary.
+
+The older Anthropic Blink artifacts are retained only as evidence. They are not considered customer-ready: one passed strict text QA but was visibly incomplete with only one embedded image, and another had more useful procedures/screenshots but failed strict QA because placeholder-confidence language leaked into the body.
 
 ## Milestones
 
@@ -149,9 +191,11 @@ The review surface should use the CustomerAppUI visual standard even during the 
 
 - Define guide draft JSON schema.
 - Define and version the Sonnet 4.6 guide prompt.
+- Regenerate Anthropic drafts from the current canonical Blink Rx traces after transcript parser and frame-resolution fixes.
 - Generate sectioned user-guide content from procedure traces.
 - Render DOCX using local keycentrix assets.
 - Include selected screenshots with captions and step references.
+- Keep reviewer concerns in DOCX comments rather than visible guide body text.
 - Run schema validation and basic forbidden-leak/placeholder QA before accepting generated DOCX output.
 
 ### Phase 4 - QA/Eval Harness
@@ -161,6 +205,7 @@ The review surface should use the CustomerAppUI visual standard even during the 
 - Add no-placeholder-text strict scans for publishable guides.
 - Add golden scenarios for one-hour walkthroughs.
 - Add rendered DOCX visual QA workflow.
+- Add a customer-readiness review checklist for Anthropic outputs: body prose quality, actionability, screenshot relevance, reviewer-comment placement, and stale-artifact detection.
 
 ## Trace Versioning
 
