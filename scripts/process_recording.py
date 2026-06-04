@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import shutil
 import subprocess
 import sys
@@ -543,7 +544,7 @@ def parse_caption_transcript(raw_text: str) -> list[dict[str, Any]]:
 
     def flush() -> None:
         nonlocal current_start, current_end, current_lines
-        text = " ".join(line.strip() for line in current_lines if line.strip())
+        text = " ".join(clean_caption_text(line) for line in current_lines if line.strip()).strip()
         if text:
             segments.append(
                 {
@@ -564,7 +565,10 @@ def parse_caption_transcript(raw_text: str) -> list[dict[str, Any]]:
                 flush()
             continue
         if "-->" in stripped:
-            flush()
+            if current_start is not None or current_end is not None:
+                flush()
+            else:
+                current_lines = []
             left, right = stripped.split("-->", 1)
             current_start = parse_caption_timestamp(left.strip())
             current_end = parse_caption_timestamp(right.split()[0].strip())
@@ -587,7 +591,7 @@ def build_transcript(
     source_segments = transcript_source.get("segments", []) if transcript_source else []
     if source_segments:
         segment_count = choose_source_segment_count(source_segments, segment_count)
-    source_chunks = split_source_segments(source_segments, segment_count) if source_segments else []
+    source_chunks = split_source_segments(source_segments, segment_count, duration, segment_seconds) if source_segments else []
     segments = []
 
     for index in range(segment_count):
@@ -645,11 +649,16 @@ def choose_transcript_source(
     return None
 
 
-def split_source_segments(source_segments: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
+def split_source_segments(
+    source_segments: list[dict[str, Any]],
+    count: int,
+    duration: float,
+    segment_seconds: float,
+) -> list[dict[str, Any]]:
     if not source_segments:
         return []
-    if len(source_segments) >= count and any(segment.get("startSeconds") is not None for segment in source_segments):
-        return normalize_source_segments(source_segments[:count])
+    if any(segment.get("startSeconds") is not None for segment in source_segments):
+        return split_timed_source_segments(source_segments, count, duration, segment_seconds)
 
     text = " ".join(str(segment.get("text", "")).strip() for segment in source_segments)
     confidence = min((parse_confidence(segment.get("confidence")) for segment in source_segments), default=0.78)
@@ -664,6 +673,58 @@ def split_source_segments(source_segments: list[dict[str, Any]], count: int) -> 
     while len(chunks) < count:
         chunks.append({"text": "", "confidence": confidence, "speaker": "Speaker 1"})
     return chunks[:count]
+
+
+def split_timed_source_segments(
+    source_segments: list[dict[str, Any]],
+    count: int,
+    duration: float,
+    segment_seconds: float,
+) -> list[dict[str, Any]]:
+    chunks = [
+        {
+            "textParts": [],
+            "confidenceValues": [],
+            "speaker": "Speaker 1",
+            "startSeconds": index * segment_seconds,
+            "endSeconds": min(duration, (index + 1) * segment_seconds),
+        }
+        for index in range(count)
+    ]
+    for segment in source_segments:
+        text = str(segment.get("text", "")).strip()
+        if not text:
+            continue
+        start = parse_float(segment.get("startSeconds"))
+        end = parse_float(segment.get("endSeconds"))
+        if start is None and end is None:
+            continue
+        anchor = start if start is not None else end
+        if anchor is None:
+            continue
+        index = max(0, min(count - 1, int(anchor // max(1.0, segment_seconds))))
+        chunk = chunks[index]
+        chunk["textParts"].append(text)
+        chunk["confidenceValues"].append(parse_confidence(segment.get("confidence")))
+        if segment.get("speaker"):
+            chunk["speaker"] = segment.get("speaker")
+        if start is not None:
+            chunk["startSeconds"] = min(chunk["startSeconds"], start)
+        if end is not None:
+            chunk["endSeconds"] = max(chunk["endSeconds"], end)
+
+    normalized = []
+    for chunk in chunks:
+        confidence_values = chunk.pop("confidenceValues")
+        text_parts = chunk.pop("textParts")
+        normalized.append(
+            {
+                **chunk,
+                "text": " ".join(text_parts),
+                "confidence": min(confidence_values) if confidence_values else 0.0,
+            }
+        )
+    return normalized
 
 
 def choose_source_segment_count(source_segments: list[dict[str, Any]], default_count: int) -> int:
@@ -1151,8 +1212,22 @@ def strip_caption_noise(raw_text: str) -> str:
         stripped = line.strip()
         if not stripped or stripped.upper() == "WEBVTT" or stripped.isdigit() or "-->" in stripped:
             continue
-        cleaned.append(stripped)
+        if is_caption_cue_identifier(stripped):
+            continue
+        cleaned.append(clean_caption_text(stripped))
     return " ".join(cleaned)
+
+
+def clean_caption_text(text: str) -> str:
+    without_voice_tags = re.sub(r"</?v(?:\s+[^>]*)?>", "", text)
+    without_tags = re.sub(r"<[^>]+>", "", without_voice_tags)
+    return " ".join(without_tags.split())
+
+
+def is_caption_cue_identifier(text: str) -> bool:
+    if " " in text or "-->" in text:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9._:-]+(?:/[A-Za-z0-9._:-]+)?", text))
 
 
 def parse_int(value: Any) -> int | None:

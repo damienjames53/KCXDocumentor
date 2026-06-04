@@ -6,12 +6,21 @@
   "scripts": {
     "eval:validate": "node tests/evals/validate-fixtures.mjs",
     "eval:offline": "node tests/evals/run-offline-fixture-evals.mjs",
-    "test:python": "python -m pytest",
-    "prototype:process": "python scripts/process_recording.py samples/raw/example.mp4 --no-media-tools --target-application \"Enterprise Rx\" --session-id prototype-demo --force",
-    "prototype:draft": "python scripts/generate_guide_draft.py samples/processed/prototype-demo/procedure_trace.json --output artifacts/generated/prototype-demo/guide_draft.json",
-    "prototype:draft:anthropic": "python scripts/generate_guide_draft.py samples/processed/prototype-demo/procedure_trace.json --use-anthropic --output artifacts/generated/prototype-demo/guide_draft.json",
-    "prototype:docx": "python scripts/build_guide_docx.py artifacts/generated/prototype-demo/guide_draft.json --output artifacts/generated/prototype-demo/user_guide.docx",
-    "prototype:qa": "python scripts/qa_document_artifacts.py artifacts/generated/prototype-demo/user_guide.docx",
-    "app:start": "python scripts/app_server.py --host 127.0.0.1 --port 8765"
+    "test:python": ".venv/bin/python -m pytest",
+    "prototype:process": ".venv/bin/python scripts/process_recording.py samples/raw/example.mp4 --no-media-tools --target-application \"Enterprise Rx\" --session-id prototype-demo --force",
+    "prototype:draft": ".venv/bin/python scripts/generate_guide_draft.py samples/processed/prototype-demo/procedure_trace.json --output artifacts/generated/prototype-demo/guide_draft.json",
+    "prototype:draft:anthropic": ".venv/bin/python scripts/generate_guide_draft.py samples/processed/prototype-demo/procedure_trace.json --use-anthropic --output artifacts/generated/prototype-demo/guide_draft.json",
+    "prototype:docx": ".venv/bin/python scripts/build_guide_docx.py artifacts/generated/prototype-demo/guide_draft.json --output artifacts/generated/prototype-demo/user_guide.docx",
+    "prototype:qa": ".venv/bin/python scripts/qa_document_artifacts.py artifacts/generated/prototype-demo/user_guide.docx",
+    "blink:process:sidecar": ".venv/bin/python scripts/process_recording.py \"samples/raw/Blink Rx Training Part 2 120525.mp4\" --transcript \"samples/raw/Newleaf and General Pharmacy Industry Training Sessions.vtt\" --target-application \"Blink Rx\" --source-profile teams-recording --session-id blink-rx-part-2-sidecar --force",
+    "blink:process:whisper": ".venv/bin/python scripts/process_recording.py \"samples/raw/Blink Rx Training Part 2 120525.mp4\" --target-application \"Blink Rx\" --source-profile teams-recording --session-id blink-rx-part-2-whisper --force",
+    "blink:draft:sidecar": ".venv/bin/python scripts/generate_guide_draft.py samples/processed/blink-rx-part-2-sidecar/procedure_trace.json --output artifacts/generated/blink-rx-part-2-sidecar/guide_draft.deterministic.json",
+    "blink:draft:whisper": ".venv/bin/python scripts/generate_guide_draft.py samples/processed/blink-rx-part-2-whisper/procedure_trace.json --output artifacts/generated/blink-rx-part-2-whisper/guide_draft.deterministic.json",
+    "blink:docx:sidecar": ".venv/bin/python scripts/build_guide_docx.py artifacts/generated/blink-rx-part-2-sidecar/guide_draft.deterministic.json --output artifacts/generated/blink-rx-part-2-sidecar/user_guide.deterministic.docx",
+    "blink:docx:whisper": ".venv/bin/python scripts/build_guide_docx.py artifacts/generated/blink-rx-part-2-whisper/guide_draft.deterministic.json --output artifacts/generated/blink-rx-part-2-whisper/user_guide.deterministic.docx",
+    "blink:qa:sidecar": ".venv/bin/python scripts/qa_document_artifacts.py artifacts/generated/blink-rx-part-2-sidecar/user_guide.deterministic.docx --json",
+    "blink:qa:whisper": ".venv/bin/python scripts/qa_document_artifacts.py artifacts/generated/blink-rx-part-2-whisper/user_guide.deterministic.docx --json",
+    "blink:compare:stt": ".venv/bin/python scripts/compare_transcripts.py samples/processed/blink-rx-part-2-sidecar/transcript.json samples/processed/blink-rx-part-2-whisper/transcript.json --output artifacts/qa/blink-rx-part-2-stt-comparison.json",
+    "app:start": ".venv/bin/python scripts/app_server.py --host 127.0.0.1 --port 8765"
   }
 }

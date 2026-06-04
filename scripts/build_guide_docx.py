@@ -107,7 +107,7 @@ def text_value(source: dict[str, Any], *keys: str, default: str = "") -> str:
     return default
 
 
-def resolve_asset_path(raw_path: Any, input_path: Path) -> Path | None:
+def resolve_asset_path(raw_path: Any, input_path: Path, asset_roots: list[Path] | None = None) -> Path | None:
     if raw_path is None:
         return None
     if isinstance(raw_path, dict):
@@ -119,7 +119,7 @@ def resolve_asset_path(raw_path: Any, input_path: Path) -> Path | None:
     if candidate.is_absolute() and candidate.exists():
         return candidate
 
-    search_roots = [input_path.parent, WORKSPACE, Path.cwd()]
+    search_roots = [input_path.parent, *(asset_roots or []), WORKSPACE, Path.cwd()]
     for root in search_roots:
         resolved = (root / candidate).resolve()
         if resolved.exists():
@@ -127,7 +127,7 @@ def resolve_asset_path(raw_path: Any, input_path: Path) -> Path | None:
     return None
 
 
-def first_existing_image(step: dict[str, Any], input_path: Path) -> tuple[Path | None, str]:
+def first_existing_image(step: dict[str, Any], input_path: Path, asset_roots: list[Path] | None = None) -> tuple[Path | None, str]:
     image_values: list[Any] = []
     for key in ("screenshot", "screenshotRef", "image", "selected_image", "selected_screenshot", "selectedImage", "selectedScreenshot"):
         if step.get(key):
@@ -144,15 +144,15 @@ def first_existing_image(step: dict[str, Any], input_path: Path) -> tuple[Path |
         image_values.append(screenshots)
 
     for value in image_values:
-        resolved = resolve_asset_path(value, input_path)
+        resolved = resolve_asset_path(value, input_path, asset_roots)
         if resolved:
             caption = text_value(step, "screenshot_caption", "caption", default=resolved.name)
             return resolved, caption
     return None, ""
 
 
-def normalize_step(step: dict[str, Any], index: int, input_path: Path) -> GuideStep:
-    screenshot, caption = first_existing_image(step, input_path)
+def normalize_step(step: dict[str, Any], index: int, input_path: Path, asset_roots: list[Path] | None = None) -> GuideStep:
+    screenshot, caption = first_existing_image(step, input_path, asset_roots)
     transcript = text_value(step, "speaker_text", "speakerText", "transcript", "narration", "description")
     action = text_value(step, "action", "instruction", "intent", "stepTextPlaceholder", "body", default=transcript)
     title = text_value(step, "title", "name", "shellId", default=f"Step {index}")
@@ -219,6 +219,7 @@ def normalize_input(data: dict[str, Any], input_path: Path) -> GuideDraft:
     if not isinstance(raw_steps, list):
         raise ValueError("Input JSON must contain a steps, procedure_steps, or segments array.")
 
+    asset_roots = infer_asset_roots(data, input_path)
     title = text_value(
         document,
         "title",
@@ -293,8 +294,32 @@ def normalize_input(data: dict[str, Any], input_path: Path) -> GuideDraft:
         troubleshooting=as_list(data.get("troubleshooting") or document.get("troubleshooting")),
         review_notes=review_notes,
         source_metadata=source_metadata,
-        steps=[normalize_step(step, idx + 1, input_path) for idx, step in enumerate(raw_steps) if isinstance(step, dict)],
+        steps=[normalize_step(step, idx + 1, input_path, asset_roots) for idx, step in enumerate(raw_steps) if isinstance(step, dict)],
     )
+
+
+def infer_asset_roots(data: dict[str, Any], input_path: Path) -> list[Path]:
+    roots: list[Path] = []
+    for session_id in candidate_session_ids(data, input_path):
+        processed_dir = WORKSPACE / "samples" / "processed" / session_id
+        if processed_dir.exists():
+            roots.append(processed_dir)
+    source_recording = data.get("sourceRecording") if isinstance(data.get("sourceRecording"), dict) else {}
+    source_file = text_value(source_recording, "sourceFile")
+    if source_file:
+        source_path = Path(source_file)
+        if source_path.exists():
+            roots.append(source_path.parent)
+    return roots
+
+
+def candidate_session_ids(data: dict[str, Any], input_path: Path) -> list[str]:
+    ids = [
+        text_value(data, "sessionId"),
+        text_value(data.get("session") if isinstance(data.get("session"), dict) else {}, "sessionId", "id"),
+        input_path.parent.name if input_path.parent.name else "",
+    ]
+    return list(dict.fromkeys(session_id for session_id in ids if session_id))
 
 
 def flatten_section_steps(data: dict[str, Any]) -> list[dict[str, Any]]:

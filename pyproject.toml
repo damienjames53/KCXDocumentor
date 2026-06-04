@@ -18,6 +18,10 @@ packages = []
 test = [
     "pytest>=8.0.0",
 ]
+visual-qa = [
+    "pdf2image>=1.17.0",
+    "Pillow>=12.0.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

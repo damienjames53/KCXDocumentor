@@ -79,6 +79,7 @@ def generate_deterministic_draft(trace: dict[str, Any], args: argparse.Namespace
 
     return {
         "schemaVersion": 1,
+        "sessionId": trace.get("sessionId", ""),
         "title": f"{app} User Guide",
         "audience": "Application users",
         "purpose": "Provide a reviewed procedure guide generated from a compact local procedure trace.",

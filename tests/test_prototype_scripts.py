@@ -17,6 +17,7 @@ DOCX_HELPER = ROOT / "tools" / "document_lib" / "keycentrix_docx.py"
 GUIDE_DRAFT_SCRIPT = ROOT / "scripts" / "generate_guide_draft.py"
 PROCESS_RECORDING_SCRIPT = ROOT / "scripts" / "process_recording.py"
 BUILD_GUIDE_DOCX_SCRIPT = ROOT / "scripts" / "build_guide_docx.py"
+COMPARE_TRANSCRIPTS_SCRIPT = ROOT / "scripts" / "compare_transcripts.py"
 
 
 def load_module(path: Path, name: str):
@@ -271,6 +272,20 @@ def test_build_guide_docx_places_reviewer_concerns_in_comments_not_body(tmp_path
     assert "Transcript confidence is below publication threshold." in comments_xml
 
 
+def test_docx_builder_resolves_processed_session_frame_assets(tmp_path: Path) -> None:
+    module = load_module(BUILD_GUIDE_DOCX_SCRIPT, "build_guide_docx_asset_roots")
+    session_dir = tmp_path / "samples" / "processed" / "demo-session"
+    image_path = session_dir / "frames" / "candidates" / "frame-0001.png"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"not-a-real-png")
+    draft_path = tmp_path / "artifacts" / "generated" / "demo-session" / "guide_draft.json"
+    draft_path.parent.mkdir(parents=True)
+
+    resolved = module.resolve_asset_path("frames/candidates/frame-0001.png", draft_path, [session_dir])
+
+    assert resolved == image_path.resolve()
+
+
 def test_artifact_qa_reports_reviewer_comments_and_body_cleanliness(tmp_path: Path) -> None:
     input_path = tmp_path / "commented-draft.json"
     output_path = tmp_path / "commented-guide.docx"
@@ -503,6 +518,81 @@ def test_process_recording_accepts_sidecar_transcript_without_media_tools(tmp_pa
     assert trace_payload["segments"][0]["confidence"]["ocr"] < 0.7
     assert trace_payload["segments"][0]["confidence"]["frameSelection"] < 0.7
     assert trace_payload["segments"][0]["confidence"]["needsHumanReview"] is True
+
+
+def test_caption_parser_ignores_teams_cue_ids_and_voice_tags() -> None:
+    module = load_module(PROCESS_RECORDING_SCRIPT, "process_recording_caption_parser")
+    raw_text = """WEBVTT
+
+724b054c-5275-4678-b67e-a50dcb6dc1a2/45-0
+00:00:12.796 --> 00:00:18.129
+<v Tina Drake>And today we're going to cover the last
+of Blink. Um,</v>
+
+724b054c-5275-4678-b67e-a50dcb6dc1a2/45-1
+00:00:18.129 --> 00:00:23.956
+<v Tina Drake>so you know she's going to run through
+what was remaining.</v>
+"""
+
+    segments = module.parse_caption_transcript(raw_text)
+
+    assert len(segments) == 2
+    assert segments[0]["text"] == "And today we're going to cover the last of Blink. Um,"
+    assert segments[1]["text"] == "so you know she's going to run through what was remaining."
+    assert "724b054c" not in " ".join(segment["text"] for segment in segments)
+    assert "<v" not in " ".join(segment["text"] for segment in segments)
+
+
+def test_timed_transcript_segments_are_bucketed_across_recording() -> None:
+    module = load_module(PROCESS_RECORDING_SCRIPT, "process_recording_timed_buckets")
+
+    chunks = module.split_source_segments(
+        [
+            {"text": "Open the first screen.", "startSeconds": 5.0, "endSeconds": 9.0, "confidence": 0.9},
+            {"text": "Review the middle workflow.", "startSeconds": 75.0, "endSeconds": 90.0, "confidence": 0.8},
+            {"text": "Confirm the final result.", "startSeconds": 125.0, "endSeconds": 135.0, "confidence": 0.7},
+        ],
+        count=3,
+        duration=180.0,
+        segment_seconds=60.0,
+    )
+
+    assert [chunk["text"] for chunk in chunks] == [
+        "Open the first screen.",
+        "Review the middle workflow.",
+        "Confirm the final result.",
+    ]
+    assert chunks[0]["startSeconds"] == 0.0
+    assert chunks[2]["endSeconds"] == 180.0
+
+
+def test_compare_transcripts_reports_overlap_and_examples() -> None:
+    module = load_module(COMPARE_TRANSCRIPTS_SCRIPT, "compare_transcripts_metrics")
+
+    report = module.compare_transcripts(
+        {
+            "source": "sidecar-transcript",
+            "segments": [
+                {"id": "tx-0001", "startSeconds": 0, "endSeconds": 60, "confidence": 0.78, "text": "Open the refill request."},
+                {"id": "tx-0002", "startSeconds": 60, "endSeconds": 120, "confidence": 0.78, "text": "Click submit to save."},
+            ],
+        },
+        {
+            "source": "local-whisper",
+            "segments": [
+                {"id": "tx-0001", "startSeconds": 0, "endSeconds": 60, "confidence": 0.88, "text": "Open the refill request."},
+                {"id": "tx-0002", "startSeconds": 60, "endSeconds": 120, "confidence": 0.6, "text": "Click save."},
+            ],
+        },
+        example_count=1,
+    )
+
+    assert report["reference"]["source"] == "sidecar-transcript"
+    assert report["candidate"]["source"] == "local-whisper"
+    assert report["comparison"]["wordOverlap"] > 0.5
+    assert report["comparison"]["averageAlignedSimilarity"] > 0.7
+    assert len(report["examples"]) == 1
 
 
 def test_whisper_json_segments_include_offsets_and_confidence() -> None:
