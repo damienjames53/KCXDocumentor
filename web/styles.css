@@ -165,6 +165,20 @@ label span {
   gap: 10px;
 }
 
+.import-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 92px;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfd;
+  padding: 10px;
+}
+
+.file-field input {
+  padding: 6px 8px;
+}
+
 .option-row {
   justify-content: space-between;
 }

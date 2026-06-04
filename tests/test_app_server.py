@@ -35,6 +35,14 @@ def find_callable(module: Any, *names: str):
     pytest.skip(f"app server does not expose any of: {', '.join(names)}")
 
 
+def find_optional_callable(module: Any, *names: str):
+    for name in names:
+        candidate = getattr(module, name, None)
+        if callable(candidate):
+            return candidate
+    return None
+
+
 class FakeHandler:
     def __init__(self) -> None:
         self.status: int | None = None
@@ -163,3 +171,75 @@ def test_processing_command_builder_uses_python_and_no_media_tools_when_requeste
     assert "Enterprise Rx" in command
     assert "--no-media-tools" in command
     assert command[0] == sys.executable or command[0].endswith("python") or command[0].endswith("python3")
+
+
+def test_recording_import_helper_copies_to_raw_root_without_path_escape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    importer = find_optional_callable(module, "import_recording", "copy_imported_recording", "save_uploaded_recording")
+    if importer is None:
+        pytest.skip("app server does not expose a recording import/upload helper yet")
+
+    raw_root = tmp_path / "samples" / "raw"
+    raw_root.mkdir(parents=True)
+    source = tmp_path / "source" / "training clip.mp4"
+    source.parent.mkdir()
+    source.write_bytes(b"fake video bytes")
+    monkeypatch.setattr(module, "RAW_ROOT", raw_root)
+
+    result = invoke_with_supported_kwargs(importer, source, raw_root=raw_root, filename="training clip.mp4")
+    imported_path = Path(result["path"] if isinstance(result, dict) and "path" in result else result)
+
+    assert imported_path.resolve().parent == raw_root.resolve()
+    assert imported_path.name.endswith(".mp4")
+    assert imported_path.read_bytes() == b"fake video bytes"
+
+    outside = tmp_path / "outside.mp4"
+    with pytest.raises((PermissionError, ValueError, module.HttpError if hasattr(module, "HttpError") else Exception)):
+        invoke_with_supported_kwargs(importer, source, raw_root=raw_root, filename="../outside.mp4")
+    assert not outside.exists()
+
+
+def test_transcript_command_builder_includes_sidecar_when_helper_supports_it(tmp_path: Path) -> None:
+    module = load_app_server()
+    builder = find_callable(module, "build_process_command", "build_processing_command")
+    if "transcript" not in inspect.signature(builder).parameters and "transcript_path" not in inspect.signature(builder).parameters:
+        pytest.skip("process command builder does not expose transcript sidecar support yet")
+
+    recording = tmp_path / "samples" / "raw" / "example.mp4"
+    transcript = tmp_path / "samples" / "raw" / "example.txt"
+    recording.parent.mkdir(parents=True)
+    recording.write_bytes(b"placeholder")
+    transcript.write_text("Click Save to finish the workflow.", encoding="utf-8")
+
+    command = invoke_with_supported_kwargs(
+        builder,
+        recording,
+        repo_root=ROOT,
+        output_root=tmp_path / "samples" / "processed",
+        session_id="demo-session",
+        target_application="Enterprise Rx",
+        no_media_tools=True,
+        transcript=transcript,
+        transcript_path=transcript,
+    )
+
+    command_text = " ".join(str(part) for part in command)
+    assert "--transcript" in command
+    assert str(transcript) in command_text
+
+
+def test_health_or_tooling_helper_reports_expected_local_dependencies() -> None:
+    module = load_app_server()
+    checker = find_optional_callable(module, "get_health", "health_check", "check_tooling", "get_tooling_status")
+    if checker is None:
+        pytest.skip("app server does not expose a health/tooling helper yet")
+
+    status = checker()
+
+    assert isinstance(status, dict)
+    serialized = json.dumps(status).lower()
+    assert "ffmpeg" in serialized
+    assert "ffprobe" in serialized
+    if "anthropic" in serialized or "api" in serialized:
+        assert "sk-ant-" not in serialized
+    assert "ok" in status or "ready" in status or "tools" in status or "dependencies" in status

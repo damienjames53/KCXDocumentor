@@ -4,6 +4,17 @@ This lane turns an imported workstation recording into a local session bundle fo
 
 It is intentionally useful before the complete STT, OCR, and CV stack exists. If `ffprobe` or `ffmpeg` are installed, the script uses them for media metadata, audio extraction, and interval frame extraction. If they are not installed, it still emits deterministic placeholder JSON with the same shape so the AI guide draft, DOCX rendering, and QA work can continue.
 
+The local app server exposes the same lane for initial video testing:
+
+- `GET /api/health` reports whether `ffmpeg` and `ffprobe` are available.
+- `GET /api/recordings` lists supported recordings in `samples/raw/`.
+- `GET /api/transcripts` lists `.txt`, `.vtt`, `.srt`, and `.json` transcript sidecars in `samples/raw/`.
+- `POST /api/import-recording` imports a multipart `file` upload into `samples/raw/`.
+- `POST /api/import-transcript` imports a multipart `file` upload into `samples/raw/`.
+- `POST /api/process` accepts `recording`, optional `transcript`, `targetApplication`, `sessionId`, `force`, and `noMediaTools`.
+
+Uploads are filename-validated and restricted to plain file names under `samples/raw/`. For very large one-hour recordings, directly copying the file into `samples/raw/` is still the most reliable local workflow until the prototype server grows a streaming upload worker.
+
 ## Command
 
 ```bash
@@ -48,7 +59,7 @@ ocr.json
 procedure_trace.json
 package_readme.md
 audio/narration.wav
-frames/candidates/
+frames/candidates/frame-0001.jpg
 frames/selected/
 ```
 
@@ -62,6 +73,18 @@ frames/selected/
 - token strategy notes for the guide generator
 
 When media tools are missing, candidate images have `created: false` and `path: null`. That is expected. Downstream prototype code should rely on the JSON shape first and treat image files as optional until the frame-selection lane matures.
+
+When `ffmpeg` is available, candidate frames are extracted as browser-friendly `.jpg` files under `frames/candidates/`. Frame records include both `path` and `webPath` values relative to the session directory so the app can serve them through `/api/session?sessionId={id}&asset={path}`.
+
+## Transcript Sidecars
+
+The processing lane can use a sidecar transcript before local Whisper transcription is wired in:
+
+- `.txt` is chunked by word count across the recording duration.
+- `.vtt` and `.srt` captions are parsed into timestamped text segments when timestamps are present.
+- `.json` can be either a list of segments or an object with `segments`. Segment fields can include `text`, `speakerText`, `startSeconds`, `endSeconds`, `speaker`, and `confidence`.
+
+Sidecar-derived segments receive usable prototype confidence instead of placeholder confidence. They still remain reviewable because OCR and computer-vision scoring are not complete yet.
 
 ## One-Hour Sample Defaults
 

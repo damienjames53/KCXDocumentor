@@ -1,5 +1,6 @@
 const state = {
   recordings: [],
+  transcripts: [],
   sessions: [],
   selectedSessionId: "",
   session: null,
@@ -10,9 +11,16 @@ const state = {
 
 const els = {
   apiStatus: document.querySelector("#apiStatus"),
+  toolStatus: document.querySelector("#toolStatus"),
   refreshAll: document.querySelector("#refreshAll"),
   pipelineForm: document.querySelector("#pipelineForm"),
+  recordingFile: document.querySelector("#recordingFile"),
+  importRecordingButton: document.querySelector("#importRecordingButton"),
+  transcriptFile: document.querySelector("#transcriptFile"),
+  importTranscriptButton: document.querySelector("#importTranscriptButton"),
   recordingSelect: document.querySelector("#recordingSelect"),
+  transcriptSelect: document.querySelector("#transcriptSelect"),
+  transcriptPathInput: document.querySelector("#transcriptPathInput"),
   targetApplication: document.querySelector("#targetApplication"),
   sessionIdInput: document.querySelector("#sessionIdInput"),
   forceProcess: document.querySelector("#forceProcess"),
@@ -49,6 +57,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
 function bindEvents() {
   els.refreshAll.addEventListener("click", refreshAll);
+  els.importRecordingButton.addEventListener("click", importRecording);
+  els.importTranscriptButton.addEventListener("click", importTranscript);
   els.pipelineForm.addEventListener("submit", processRecording);
   els.deterministicDraftButton.addEventListener("click", () => generateDraft(false));
   els.anthropicDraftButton.addEventListener("click", () => generateDraft(true));
@@ -56,6 +66,9 @@ function bindEvents() {
   els.qaDocxButton.addEventListener("click", runDocxQa);
   els.reloadSession.addEventListener("click", () => loadSelectedSession());
   els.recordingSelect.addEventListener("change", syncSessionIdPlaceholder);
+  els.transcriptSelect.addEventListener("change", () => {
+    els.transcriptPathInput.value = els.transcriptSelect.value;
+  });
 
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
@@ -68,15 +81,20 @@ function bindEvents() {
 async function refreshAll() {
   setBusy(true);
   try {
-    const [recordings, sessions] = await Promise.all([
+    const [recordings, sessions, transcripts, health] = await Promise.all([
       apiGet("/api/recordings"),
       apiGet("/api/sessions"),
+      loadTranscripts(),
+      loadHealth(),
     ]);
     state.recordings = normalizeCollection(recordings, "recordings");
     state.sessions = normalizeCollection(sessions, "sessions");
+    state.transcripts = normalizeCollection(transcripts, "transcripts");
     setApiStatus("API ready", "good");
+    setToolStatus(health);
     logActivity("Loaded recordings and sessions.");
     renderRecordings();
+    renderTranscripts();
     renderSessions();
     syncSessionIdPlaceholder();
 
@@ -89,8 +107,77 @@ async function refreshAll() {
     setApiStatus("API unavailable", "bad");
     logActivity(error.message, "error");
     renderRecordings();
+    renderTranscripts();
     renderSessions();
     renderAll();
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function loadTranscripts() {
+  try {
+    return await apiGet("/api/transcripts");
+  } catch {
+    return { transcripts: [] };
+  }
+}
+
+async function loadHealth() {
+  try {
+    return await apiGet("/api/health");
+  } catch {
+    return null;
+  }
+}
+
+async function importRecording() {
+  const file = els.recordingFile.files?.[0];
+  if (!file) {
+    logActivity("Choose a recording file to import.", "warn");
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append("recording", file);
+
+  setBusy(true);
+  try {
+    const result = await apiPostForm("/api/import-recording", formData);
+    const imported = getRecordingValue(result.recording || result.fileName || result.name || file.name);
+    logActivity(`Imported recording ${imported}.`);
+    els.recordingFile.value = "";
+    await refreshAll();
+    selectRecording(imported);
+  } catch (error) {
+    logActivity(`Recording import failed: ${error.message}`, "error");
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function importTranscript() {
+  const file = els.transcriptFile.files?.[0];
+  if (!file) {
+    logActivity("Choose a transcript file to import.", "warn");
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append("transcript", file);
+
+  setBusy(true);
+  try {
+    const result = await apiPostForm("/api/import-transcript", formData);
+    const imported = getTranscriptValue(result.transcript || result.path || result.fileName || result.name || file.name);
+    logActivity(`Imported transcript ${imported}.`);
+    els.transcriptFile.value = "";
+    upsertTranscript(imported);
+    renderTranscripts();
+    els.transcriptSelect.value = imported;
+    els.transcriptPathInput.value = imported;
+  } catch (error) {
+    logActivity(`Transcript import failed: ${error.message}`, "error");
   } finally {
     setBusy(false);
   }
@@ -108,6 +195,7 @@ async function processRecording(event) {
     recording,
     targetApplication: els.targetApplication.value.trim() || "Unknown Application",
     sessionId: els.sessionIdInput.value.trim() || undefined,
+    transcript: getSelectedTranscript() || undefined,
     force: els.forceProcess.checked,
     noMediaTools: els.noMediaTools.checked,
   };
@@ -263,6 +351,15 @@ async function apiPost(path, payload) {
   return parseApiResponse(response);
 }
 
+async function apiPostForm(path, formData) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { Accept: "application/json" },
+    body: formData,
+  });
+  return parseApiResponse(response);
+}
+
 async function parseApiResponse(response) {
   const text = await response.text();
   const data = text ? safeJson(text) : {};
@@ -335,6 +432,20 @@ function renderRecordings() {
   els.recordingCount.textContent = String(state.recordings.length);
 }
 
+function renderTranscripts() {
+  const selected = els.transcriptPathInput.value || els.transcriptSelect.value;
+  els.transcriptSelect.innerHTML = "";
+  els.transcriptSelect.append(new Option("No transcript selected", ""));
+  state.transcripts.forEach((transcript) => {
+    const label = getTranscriptLabel(transcript);
+    const value = getTranscriptValue(transcript);
+    els.transcriptSelect.append(new Option(label, value));
+  });
+  if (selected && Array.from(els.transcriptSelect.options).some((option) => option.value === selected)) {
+    els.transcriptSelect.value = selected;
+  }
+}
+
 function renderSessions() {
   els.sessionList.innerHTML = "";
   els.sessionCount.textContent = String(state.sessions.length);
@@ -354,6 +465,14 @@ function renderSessions() {
     item.addEventListener("click", () => selectSession(sessionId, { load: true }));
     els.sessionList.append(item);
   });
+}
+
+function selectRecording(recordingValue) {
+  const value = getRecordingValue(recordingValue);
+  if (Array.from(els.recordingSelect.options).some((option) => option.value === value)) {
+    els.recordingSelect.value = value;
+    syncSessionIdPlaceholder();
+  }
 }
 
 function renderSelectedSessionPill() {
@@ -558,7 +677,29 @@ function getRecordingLabel(recording) {
 
 function getRecordingValue(recording) {
   if (typeof recording === "string") return recording;
-  return recording.path || recording.name || recording.sourceFile || recording.fileName || "";
+  return recording.relativePath || recording.path || recording.name || recording.sourceFile || recording.fileName || "";
+}
+
+function getTranscriptLabel(transcript) {
+  if (typeof transcript === "string") return transcript;
+  return transcript.name || transcript.fileName || transcript.path || "transcript";
+}
+
+function getTranscriptValue(transcript) {
+  if (typeof transcript === "string") return transcript;
+  return transcript.relativePath || transcript.path || transcript.name || transcript.fileName || "";
+}
+
+function getSelectedTranscript() {
+  return els.transcriptPathInput.value.trim() || els.transcriptSelect.value;
+}
+
+function upsertTranscript(transcript) {
+  const value = getTranscriptValue(transcript);
+  if (!value) return;
+  if (!state.transcripts.some((item) => getTranscriptValue(item) === value)) {
+    state.transcripts = [...state.transcripts, transcript];
+  }
 }
 
 function getSessionId(session) {
@@ -605,10 +746,24 @@ function setApiStatus(text, stateName) {
   els.apiStatus.className = `status-pill ${stateName}`;
 }
 
+function setToolStatus(health) {
+  const ffmpeg = Boolean(health?.tools?.ffmpeg?.available);
+  const ffprobe = Boolean(health?.tools?.ffprobe?.available);
+  if (ffmpeg && ffprobe) {
+    els.toolStatus.textContent = "Media tools ready";
+    els.toolStatus.className = "status-pill good";
+  } else {
+    els.toolStatus.textContent = "Media tools missing";
+    els.toolStatus.className = "status-pill warn";
+  }
+}
+
 function setBusy(isBusy) {
   state.busy = isBusy;
   [
     els.refreshAll,
+    els.importRecordingButton,
+    els.importTranscriptButton,
     els.processButton,
     els.deterministicDraftButton,
     els.anthropicDraftButton,

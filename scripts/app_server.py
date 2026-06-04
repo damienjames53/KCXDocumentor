@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import mimetypes
 import os
 import re
+import shutil
 import subprocess
 import sys
 from http import HTTPStatus
@@ -23,6 +25,10 @@ RAW_ROOT = WORKSPACE / "samples" / "raw"
 PROCESSED_ROOT = WORKSPACE / "samples" / "processed"
 GENERATED_ROOT = WORKSPACE / "artifacts" / "generated"
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_. -]{0,180}$")
+RECORDING_EXTENSIONS = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".wmv", ".m4v"}
+TRANSCRIPT_EXTENSIONS = {".txt", ".vtt", ".srt", ".json"}
+MULTIPART_MAX_BYTES = 3 * 1024 * 1024 * 1024
 REDACTION_PATTERNS = [
     re.compile(r"(?i)(anthropic[_-]?api[_-]?key\s*[=:]\s*)[^\s\"']+"),
     re.compile(r"sk-ant-[A-Za-z0-9_-]+"),
@@ -60,8 +66,14 @@ class KCXDocumentorHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/recordings":
                 self.send_json({"recordings": list_recordings()})
                 return
+            if parsed.path == "/api/transcripts":
+                self.send_json({"transcripts": list_transcripts()})
+                return
             if parsed.path == "/api/sessions":
                 self.send_json({"sessions": list_sessions()})
+                return
+            if parsed.path == "/api/health":
+                self.send_json(get_health())
                 return
             if parsed.path == "/api/session":
                 params = parse_qs(parsed.query)
@@ -82,6 +94,12 @@ class KCXDocumentorHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             parsed = urlparse(self.path)
+            if parsed.path == "/api/import-recording":
+                self.send_json(import_upload(self, kind="recording"))
+                return
+            if parsed.path == "/api/import-transcript":
+                self.send_json(import_upload(self, kind="transcript"))
+                return
             body = self.read_json_body()
             if parsed.path == "/api/process":
                 self.send_json(process_recording(body))
@@ -173,18 +191,52 @@ class HttpError(Exception):
 def list_recordings() -> list[dict[str, Any]]:
     recordings = []
     for path in sorted(RAW_ROOT.iterdir(), key=lambda item: item.name.lower()):
-        if not path.is_file() or path.name.startswith("."):
+        if not path.is_file() or path.name.startswith(".") or path.suffix.lower() not in RECORDING_EXTENSIONS:
             continue
-        stat = path.stat()
-        recordings.append(
-            {
-                "name": path.name,
-                "relativePath": str(path.relative_to(RAW_ROOT)),
-                "sizeBytes": stat.st_size,
-                "modifiedUtc": utc_from_timestamp(stat.st_mtime),
-            }
-        )
+        recordings.append(describe_raw_file(path))
     return recordings
+
+
+def list_transcripts() -> list[dict[str, Any]]:
+    transcripts = []
+    for path in sorted(RAW_ROOT.iterdir(), key=lambda item: item.name.lower()):
+        if not path.is_file() or path.name.startswith(".") or path.suffix.lower() not in TRANSCRIPT_EXTENSIONS:
+            continue
+        transcripts.append(describe_raw_file(path))
+    return transcripts
+
+
+def describe_raw_file(path: Path) -> dict[str, Any]:
+    stat = path.stat()
+    return {
+        "name": path.name,
+        "relativePath": str(path.relative_to(RAW_ROOT)),
+        "sizeBytes": stat.st_size,
+        "modifiedUtc": utc_from_timestamp(stat.st_mtime),
+        "extension": path.suffix.lower(),
+    }
+
+
+def get_health() -> dict[str, Any]:
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    return {
+        "status": "ok",
+        "workspace": str(WORKSPACE),
+        "rawRoot": relative_to_workspace(RAW_ROOT),
+        "processedRoot": relative_to_workspace(PROCESSED_ROOT),
+        "generatedRoot": relative_to_workspace(GENERATED_ROOT),
+        "tools": {
+            "ffmpeg": {
+                "available": bool(ffmpeg),
+                "path": ffmpeg,
+            },
+            "ffprobe": {
+                "available": bool(ffprobe),
+                "path": ffprobe,
+            },
+        },
+    }
 
 
 def list_sessions() -> list[dict[str, Any]]:
@@ -198,6 +250,7 @@ def list_sessions() -> list[dict[str, Any]]:
 
 def process_recording(body: dict[str, Any]) -> dict[str, Any]:
     recording = require_recording_path(body.get("recording"))
+    transcript = optional_transcript_path(body.get("transcript"))
     target_application = string_value(body.get("targetApplication"), "Unknown Application")
     session_id = optional_session_id(body.get("sessionId"))
     no_media_tools = bool(body.get("noMediaTools", False))
@@ -207,6 +260,7 @@ def process_recording(body: dict[str, Any]) -> dict[str, Any]:
         recording,
         session_id=session_id,
         target_application=target_application,
+        transcript=transcript,
         no_media_tools=no_media_tools,
         force=force,
     )
@@ -406,6 +460,7 @@ def build_process_command(
     output_root: Path = PROCESSED_ROOT,
     session_id: str | None = None,
     target_application: str = "Unknown Application",
+    transcript: Path | None = None,
     no_media_tools: bool = False,
     force: bool = False,
 ) -> list[str]:
@@ -418,6 +473,8 @@ def build_process_command(
         "--target-application",
         target_application,
     ]
+    if transcript:
+        command.extend(["--transcript", str(transcript)])
     if session_id:
         command.extend(["--session-id", session_id])
     if no_media_tools:
@@ -435,9 +492,21 @@ def require_recording_path(raw_value: Any) -> Path:
     value = string_value(raw_value, "")
     if not value:
         raise HttpError(HTTPStatus.BAD_REQUEST, "recording is required.")
-    candidate = (RAW_ROOT / value).resolve()
+    filename = validate_safe_filename(value, RECORDING_EXTENSIONS, "recording")
+    candidate = (RAW_ROOT / filename).resolve()
     if not is_relative_to(candidate, RAW_ROOT) or not candidate.is_file():
         raise HttpError(HTTPStatus.NOT_FOUND, "Recording not found in samples/raw.")
+    return candidate
+
+
+def optional_transcript_path(raw_value: Any) -> Path | None:
+    value = string_value(raw_value, "")
+    if not value:
+        return None
+    filename = validate_safe_filename(value, TRANSCRIPT_EXTENSIONS, "transcript")
+    candidate = (RAW_ROOT / filename).resolve()
+    if not is_relative_to(candidate, RAW_ROOT) or not candidate.is_file():
+        raise HttpError(HTTPStatus.NOT_FOUND, "Transcript not found in samples/raw.")
     return candidate
 
 
@@ -465,6 +534,148 @@ def optional_session_id(raw_value: Any) -> str | None:
 def first_query_value(params: dict[str, list[str]], key: str) -> str:
     values = params.get(key) or []
     return values[0] if values else ""
+
+
+def import_upload(handler: KCXDocumentorHandler, kind: str) -> dict[str, Any]:
+    allowed_extensions = RECORDING_EXTENSIONS if kind == "recording" else TRANSCRIPT_EXTENSIONS
+    form = parse_multipart_upload(handler)
+    uploaded = form.get(kind) or form.get("file")
+    if not uploaded or not isinstance(uploaded, dict):
+        raise HttpError(HTTPStatus.BAD_REQUEST, f"Multipart upload must include a file field named '{kind}' or 'file'.")
+
+    original_name = string_value(uploaded.get("filename"), "")
+    filename = validate_safe_filename(original_name, allowed_extensions, kind)
+    payload = uploaded.get("content")
+    if not isinstance(payload, bytes) or not payload:
+        raise HttpError(HTTPStatus.BAD_REQUEST, "Uploaded file is empty.")
+
+    target = unique_raw_path(filename)
+    target.write_bytes(payload)
+
+    return {
+        kind: describe_raw_file(target),
+        "originalName": original_name,
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def parse_multipart_upload(handler: KCXDocumentorHandler) -> dict[str, Any]:
+    content_type = handler.headers.get("Content-Type", "")
+    boundary = multipart_boundary(content_type)
+    if not boundary:
+        raise HttpError(HTTPStatus.BAD_REQUEST, "Content-Type must be multipart/form-data with a boundary.")
+
+    length = int(handler.headers.get("Content-Length", "0") or "0")
+    if length <= 0:
+        raise HttpError(HTTPStatus.BAD_REQUEST, "Multipart upload is empty.")
+    if length > MULTIPART_MAX_BYTES:
+        raise HttpError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Multipart upload is too large for the local prototype server.")
+
+    body = handler.rfile.read(length)
+    delimiter = b"--" + boundary
+    fields: dict[str, Any] = {}
+    for raw_part in body.split(delimiter):
+        part = raw_part.strip()
+        if not part or part == b"--":
+            continue
+        if part.endswith(b"--"):
+            part = part[:-2].strip()
+        header_bytes, separator, content = part.partition(b"\r\n\r\n")
+        if not separator:
+            continue
+        headers = parse_part_headers(header_bytes)
+        disposition = headers.get("content-disposition", "")
+        params = parse_content_disposition(disposition)
+        name = params.get("name")
+        if not name:
+            continue
+        if content.endswith(b"\r\n"):
+            content = content[:-2]
+        filename = params.get("filename")
+        if filename is not None:
+            fields[name] = {"filename": filename, "content": content}
+        else:
+            fields[name] = content.decode("utf-8", errors="replace")
+    return fields
+
+
+def multipart_boundary(content_type: str) -> bytes | None:
+    for part in content_type.split(";"):
+        part = part.strip()
+        if part.startswith("boundary="):
+            boundary = part.split("=", 1)[1].strip().strip('"')
+            return boundary.encode("utf-8") if boundary else None
+    return None
+
+
+def parse_part_headers(header_bytes: bytes) -> dict[str, str]:
+    headers = {}
+    for line in header_bytes.decode("utf-8", errors="replace").split("\r\n"):
+        key, separator, value = line.partition(":")
+        if separator:
+            headers[key.strip().lower()] = value.strip()
+    return headers
+
+
+def parse_content_disposition(value: str) -> dict[str, str]:
+    params = {}
+    for part in value.split(";"):
+        part = part.strip()
+        if "=" not in part:
+            continue
+        key, raw = part.split("=", 1)
+        params[key.strip().lower()] = raw.strip().strip('"')
+    return params
+
+
+def validate_safe_filename(raw_filename: str, allowed_extensions: set[str], kind: str) -> str:
+    filename = Path(raw_filename).name.strip()
+    if filename != raw_filename.strip() or not filename or filename in {".", ".."}:
+        raise HttpError(HTTPStatus.BAD_REQUEST, f"{kind} filename must be a plain file name.")
+    if not SAFE_FILENAME_RE.match(filename):
+        raise HttpError(HTTPStatus.BAD_REQUEST, f"{kind} filename contains unsupported characters.")
+    if Path(filename).suffix.lower() not in allowed_extensions:
+        allowed = ", ".join(sorted(allowed_extensions))
+        raise HttpError(HTTPStatus.BAD_REQUEST, f"{kind} file extension must be one of: {allowed}.")
+    return filename
+
+
+def unique_raw_path(filename: str) -> Path:
+    candidate = (RAW_ROOT / filename).resolve()
+    if not is_relative_to(candidate, RAW_ROOT):
+        raise HttpError(HTTPStatus.BAD_REQUEST, "Upload path escapes samples/raw.")
+    if not candidate.exists():
+        return candidate
+
+    stem = candidate.stem
+    suffix = candidate.suffix
+    for index in range(2, 1000):
+        alternate = (RAW_ROOT / f"{stem}-{index}{suffix}").resolve()
+        if not is_relative_to(alternate, RAW_ROOT):
+            raise HttpError(HTTPStatus.BAD_REQUEST, "Upload path escapes samples/raw.")
+        if not alternate.exists():
+            return alternate
+    raise HttpError(HTTPStatus.CONFLICT, "Could not choose a unique upload filename.")
+
+
+def save_uploaded_recording(source: Path, raw_root: Path = RAW_ROOT, filename: str | None = None) -> dict[str, Any]:
+    source_path = Path(source).resolve()
+    if not source_path.is_file():
+        raise ValueError(f"Source recording does not exist: {source}")
+    safe_name = validate_safe_filename(filename or source_path.name, RECORDING_EXTENSIONS, "recording")
+    target = (raw_root / safe_name).resolve()
+    if not is_relative_to(target, raw_root):
+        raise PermissionError("Upload path escapes raw root.")
+    if target.exists():
+        stem = target.stem
+        suffix = target.suffix
+        for index in range(2, 1000):
+            alternate = (raw_root / f"{stem}-{index}{suffix}").resolve()
+            if not alternate.exists():
+                target = alternate
+                break
+    target.write_bytes(source_path.read_bytes())
+    return {"path": str(target), "name": target.name}
 
 
 def infer_session_id_from_stdout(stdout: str) -> str | None:

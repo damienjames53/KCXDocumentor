@@ -18,6 +18,52 @@ If `web/index.html` does not exist yet, static root requests will return a 404 J
 
 ## Endpoints
 
+`POST /api/import-recording`
+
+Imports a local recording into `samples/raw` using `multipart/form-data`.
+
+Expected form field:
+
+```text
+recording=<video file>
+```
+
+The UI accepts common video containers such as MP4, MKV, MOV, WEBM, and AVI. A successful response should include the stored name or path, for example:
+
+```json
+{
+  "recording": "workflow-sample.mp4"
+}
+```
+
+`POST /api/import-transcript`
+
+Imports an optional transcript sidecar using `multipart/form-data`.
+
+Expected form field:
+
+```text
+transcript=<transcript file>
+```
+
+The UI accepts JSON, TXT, VTT, SRT, CSV, and TSV transcript files. A successful response should include the stored transcript path or name:
+
+```json
+{
+  "transcript": "workflow-sample.vtt"
+}
+```
+
+`GET /api/transcripts`
+
+Optional endpoint for listing transcript sidecars. The UI works without it, but if present it should return:
+
+```json
+{
+  "transcripts": ["workflow-sample.vtt"]
+}
+```
+
 `GET /api/recordings`
 
 Lists files available under `samples/raw`.
@@ -37,11 +83,14 @@ Runs `scripts/process_recording.py`.
 ```json
 {
   "recording": "example.mp4",
+  "transcript": "example.vtt",
   "targetApplication": "Enterprise Rx",
   "sessionId": "local-test",
   "noMediaTools": true
 }
 ```
+
+The `transcript` property is optional. When provided, it should be passed through to `scripts/process_recording.py --transcript` so the first real-video tests can use a human or vendor-produced transcript before local STT is fully wired.
 
 `POST /api/generate-draft`
 
@@ -74,9 +123,15 @@ The `draft` value must be `deterministic` or `anthropic`.
 ```bash
 curl http://127.0.0.1:8765/api/recordings
 
+curl -X POST http://127.0.0.1:8765/api/import-recording \
+  -F 'recording=@samples/incoming/workflow-sample.mp4'
+
+curl -X POST http://127.0.0.1:8765/api/import-transcript \
+  -F 'transcript=@samples/incoming/workflow-sample.vtt'
+
 curl -X POST http://127.0.0.1:8765/api/process \
   -H 'Content-Type: application/json' \
-  -d '{"recording":"example.mp4","targetApplication":"Enterprise Rx","sessionId":"local-test","noMediaTools":true}'
+  -d '{"recording":"workflow-sample.mp4","transcript":"workflow-sample.vtt","targetApplication":"Enterprise Rx","sessionId":"local-test","noMediaTools":true}'
 
 curl -X POST http://127.0.0.1:8765/api/generate-draft \
   -H 'Content-Type: application/json' \

@@ -14,6 +14,7 @@
       </div>
       <div class="status-strip" aria-live="polite">
         <span id="apiStatus" class="status-pill neutral">API not checked</span>
+        <span id="toolStatus" class="status-pill neutral">Tools not checked</span>
         <button id="refreshAll" class="icon-button" type="button" title="Refresh recordings and sessions">Refresh</button>
       </div>
     </header>
@@ -26,11 +27,37 @@
         </div>
 
         <form id="pipelineForm" class="stack">
+          <div class="import-grid" aria-label="Recording and transcript import">
+            <label class="file-field">
+              <span>Import recording</span>
+              <input id="recordingFile" type="file" accept="video/*,.mp4,.mkv,.mov,.webm,.avi">
+            </label>
+            <button id="importRecordingButton" class="secondary" type="button">Import</button>
+
+            <label class="file-field">
+              <span>Import transcript</span>
+              <input id="transcriptFile" type="file" accept=".json,.txt,.vtt,.srt,.csv,.tsv,text/*,application/json">
+            </label>
+            <button id="importTranscriptButton" class="secondary" type="button">Import</button>
+          </div>
+
           <label>
             <span>Recording</span>
             <select id="recordingSelect" name="recording" required>
               <option value="">Loading recordings...</option>
             </select>
+          </label>
+
+          <label>
+            <span>Transcript</span>
+            <select id="transcriptSelect" name="transcript">
+              <option value="">No transcript selected</option>
+            </select>
+          </label>
+
+          <label>
+            <span>Transcript path</span>
+            <input id="transcriptPathInput" name="transcriptPath" autocomplete="off" placeholder="optional transcript from samples/raw or import result">
           </label>
 
           <div class="field-grid">

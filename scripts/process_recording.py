@@ -71,10 +71,10 @@ def main() -> int:
     create_session_dirs(session_dir)
 
     metadata = inspect_media(source, tooling, args.assume_duration_seconds)
-    sidecar_text = read_sidecar_transcript(args.transcript)
+    sidecar_transcript = read_sidecar_transcript(args.transcript)
     transcript = build_transcript(
         metadata=metadata,
-        sidecar_text=sidecar_text,
+        sidecar_transcript=sidecar_transcript,
         segment_seconds=args.segment_seconds,
         target_application=args.target_application,
     )
@@ -112,6 +112,10 @@ def main() -> int:
             "ocr": "ocr.json",
             "procedureTrace": "procedure_trace.json",
             "packageReadme": "package_readme.md",
+        },
+        "inputs": {
+            "recording": str(source),
+            "transcript": sidecar_transcript["path"] if sidecar_transcript else None,
         },
     }
 
@@ -289,68 +293,200 @@ def summarize_stream(stream: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def read_sidecar_transcript(path: Path | None) -> str | None:
+def read_sidecar_transcript(path: Path | None) -> dict[str, Any] | None:
     if not path:
         return None
     transcript_path = path.expanduser().resolve()
     if not transcript_path.exists() or not transcript_path.is_file():
         raise SystemExit(f"transcript does not exist or is not a file: {transcript_path}")
-    return transcript_path.read_text(encoding="utf-8").strip()
+    raw_text = transcript_path.read_text(encoding="utf-8").strip()
+    suffix = transcript_path.suffix.lower()
+    if suffix == ".json":
+        parsed = parse_json_transcript(raw_text)
+    elif suffix in {".vtt", ".srt"}:
+        parsed = parse_caption_transcript(raw_text)
+    else:
+        parsed = [{"text": raw_text, "confidence": 0.78}]
+
+    return {
+        "path": str(transcript_path),
+        "name": transcript_path.name,
+        "format": suffix.lstrip(".") or "txt",
+        "segments": [segment for segment in parsed if segment.get("text", "").strip()],
+    }
+
+
+def parse_json_transcript(raw_text: str) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return [{"text": raw_text, "confidence": 0.6}]
+
+    raw_segments = payload.get("segments") if isinstance(payload, dict) else payload
+    if not isinstance(raw_segments, list):
+        text = payload.get("text") if isinstance(payload, dict) else None
+        return [{"text": str(text or raw_text), "confidence": parse_confidence(payload.get("confidence") if isinstance(payload, dict) else None)}]
+
+    segments = []
+    for index, item in enumerate(raw_segments):
+        if isinstance(item, str):
+            segments.append({"text": item, "confidence": 0.78})
+            continue
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text") or item.get("speakerText") or item.get("transcript") or ""
+        start = parse_float(item.get("startSeconds"))
+        end = parse_float(item.get("endSeconds"))
+        segments.append(
+            {
+                "id": item.get("id") or f"sidecar-{index + 1:04d}",
+                "text": str(text),
+                "startSeconds": start,
+                "endSeconds": end,
+                "confidence": parse_confidence(item.get("confidence")),
+                "speaker": item.get("speaker") or "Speaker 1",
+            }
+        )
+    return segments
+
+
+def parse_caption_transcript(raw_text: str) -> list[dict[str, Any]]:
+    segments = []
+    current_start: float | None = None
+    current_end: float | None = None
+    current_lines: list[str] = []
+
+    def flush() -> None:
+        nonlocal current_start, current_end, current_lines
+        text = " ".join(line.strip() for line in current_lines if line.strip())
+        if text:
+            segments.append(
+                {
+                    "text": text,
+                    "startSeconds": current_start,
+                    "endSeconds": current_end,
+                    "confidence": 0.78,
+                }
+            )
+        current_start = None
+        current_end = None
+        current_lines = []
+
+    for line in raw_text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.upper() == "WEBVTT" or stripped.isdigit():
+            if not stripped:
+                flush()
+            continue
+        if "-->" in stripped:
+            flush()
+            left, right = stripped.split("-->", 1)
+            current_start = parse_caption_timestamp(left.strip())
+            current_end = parse_caption_timestamp(right.split()[0].strip())
+            continue
+        current_lines.append(stripped)
+    flush()
+    return segments or [{"text": strip_caption_noise(raw_text), "confidence": 0.6}]
 
 
 def build_transcript(
     metadata: dict[str, Any],
-    sidecar_text: str | None,
+    sidecar_transcript: dict[str, Any] | None,
     segment_seconds: float,
     target_application: str,
 ) -> dict[str, Any]:
     duration = metadata["durationSeconds"]
     segment_count = max(1, math.ceil(duration / max(1.0, segment_seconds)))
-    sidecar_chunks = split_text(sidecar_text, segment_count) if sidecar_text else []
+    sidecar_segments = sidecar_transcript.get("segments", []) if sidecar_transcript else []
+    if sidecar_segments:
+        segment_count = choose_sidecar_segment_count(sidecar_segments, segment_count)
+    sidecar_chunks = split_sidecar_segments(sidecar_segments, segment_count) if sidecar_segments else []
     segments = []
 
     for index in range(segment_count):
         start = index * segment_seconds
         end = min(duration, (index + 1) * segment_seconds)
-        text = (
-            sidecar_chunks[index]
-            if sidecar_chunks
-            else placeholder_transcript_text(index, target_application)
-        )
+        sidecar_chunk = sidecar_chunks[index] if sidecar_chunks else None
+        text = sidecar_chunk["text"] if sidecar_chunk else placeholder_transcript_text(index, target_application)
+        segment_start = sidecar_chunk.get("startSeconds") if sidecar_chunk and sidecar_chunk.get("startSeconds") is not None else start
+        segment_end = sidecar_chunk.get("endSeconds") if sidecar_chunk and sidecar_chunk.get("endSeconds") is not None else end
         segments.append(
             {
                 "id": f"tx-{index + 1:04d}",
-                "startSeconds": round_positive(start),
-                "endSeconds": round_positive(end),
-                "start": format_timestamp(start),
-                "end": format_timestamp(end),
-                "speaker": "Speaker 1",
+                "startSeconds": round_positive(segment_start),
+                "endSeconds": round_positive(segment_end),
+                "start": format_timestamp(segment_start),
+                "end": format_timestamp(segment_end),
+                "speaker": sidecar_chunk.get("speaker", "Speaker 1") if sidecar_chunk else "Speaker 1",
                 "text": text,
-                "source": "sidecar-transcript" if sidecar_text else "deterministic-placeholder",
-                "confidence": None if sidecar_text else 0.0,
+                "source": "sidecar-transcript" if sidecar_chunk else "deterministic-placeholder",
+                "confidence": sidecar_chunk["confidence"] if sidecar_chunk else 0.0,
             }
         )
 
     return {
         "schemaVersion": 1,
-        "source": "sidecar-transcript" if sidecar_text else "deterministic-placeholder",
+        "source": "sidecar-transcript" if sidecar_segments else "deterministic-placeholder",
+        "sourceTranscript": {
+            "name": sidecar_transcript.get("name"),
+            "path": sidecar_transcript.get("path"),
+            "format": sidecar_transcript.get("format"),
+        }
+        if sidecar_transcript
+        else None,
         "language": "en",
         "durationSeconds": duration,
         "segments": segments,
     }
 
 
-def split_text(text: str | None, count: int) -> list[str]:
-    if not text:
+def split_sidecar_segments(sidecar_segments: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
+    if not sidecar_segments:
         return []
+    if len(sidecar_segments) >= count and any(segment.get("startSeconds") is not None for segment in sidecar_segments):
+        return normalize_sidecar_segments(sidecar_segments[:count])
+
+    text = " ".join(str(segment.get("text", "")).strip() for segment in sidecar_segments)
+    confidence = min((parse_confidence(segment.get("confidence")) for segment in sidecar_segments), default=0.78)
     words = text.split()
     if not words:
         return []
     chunk_size = max(1, math.ceil(len(words) / count))
-    chunks = [" ".join(words[i : i + chunk_size]) for i in range(0, len(words), chunk_size)]
+    chunks = [
+        {"text": " ".join(words[i : i + chunk_size]), "confidence": confidence, "speaker": "Speaker 1"}
+        for i in range(0, len(words), chunk_size)
+    ]
     while len(chunks) < count:
-        chunks.append("")
+        chunks.append({"text": "", "confidence": confidence, "speaker": "Speaker 1"})
     return chunks[:count]
+
+
+def choose_sidecar_segment_count(sidecar_segments: list[dict[str, Any]], default_count: int) -> int:
+    if default_count <= 4:
+        return default_count
+
+    timed_count = sum(1 for segment in sidecar_segments if segment.get("startSeconds") is not None)
+    if timed_count:
+        return max(1, min(default_count, timed_count))
+
+    word_count = sum(len(str(segment.get("text", "")).split()) for segment in sidecar_segments)
+    transcript_sized_count = max(1, math.ceil(word_count / 120))
+    return max(1, min(default_count, transcript_sized_count))
+
+
+def normalize_sidecar_segments(sidecar_segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized = []
+    for segment in sidecar_segments:
+        normalized.append(
+            {
+                "text": str(segment.get("text", "")).strip(),
+                "startSeconds": segment.get("startSeconds"),
+                "endSeconds": segment.get("endSeconds"),
+                "confidence": parse_confidence(segment.get("confidence")),
+                "speaker": segment.get("speaker") or "Speaker 1",
+            }
+        )
+    return normalized
 
 
 def placeholder_transcript_text(index: int, target_application: str) -> str:
@@ -423,6 +559,7 @@ def maybe_extract_frames(
                 "timestampSeconds": timestamp,
                 "timestamp": format_timestamp(timestamp),
                 "path": None,
+                "webPath": None,
                 "created": False,
                 "source": "deterministic-placeholder",
                 "error": "ffmpeg not available",
@@ -458,6 +595,7 @@ def maybe_extract_frames(
                 "timestampSeconds": timestamp,
                 "timestamp": format_timestamp(timestamp),
                 "path": str(path.relative_to(session_dir)) if created else None,
+                "webPath": str(path.relative_to(session_dir)).replace("\\", "/") if created else None,
                 "created": created,
                 "source": "ffmpeg" if created else "deterministic-placeholder",
                 "error": None if created else command["stderr"] or f"ffmpeg exited {command['returnCode']}",
@@ -585,6 +723,7 @@ def build_procedure_trace(
                     {
                         "frameId": frame["id"],
                         "path": frame["path"],
+                        "webPath": frame.get("webPath") or frame["path"],
                         "timestamp": frame["timestamp"],
                         "timestampSeconds": frame["timestampSeconds"],
                         "score": frame["score"],
@@ -614,6 +753,7 @@ def build_procedure_trace(
             "targetApplication": target_application,
             "captureMode": "imported-recording",
             "audio": extracted_audio,
+            "transcript": transcript.get("sourceTranscript"),
         },
         "segments": segments,
         "downstreamUse": {
@@ -747,6 +887,40 @@ def parse_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def parse_confidence(value: Any) -> float:
+    if isinstance(value, dict):
+        value = value.get("overall") or value.get("transcript")
+    parsed = parse_float(value)
+    if parsed is None:
+        return 0.78
+    return min(1.0, max(0.0, parsed))
+
+
+def parse_caption_timestamp(value: str) -> float | None:
+    normalized = value.replace(",", ".")
+    parts = normalized.split(":")
+    try:
+        if len(parts) == 3:
+            hours, minutes, seconds = parts
+            return (int(hours) * 3600) + (int(minutes) * 60) + float(seconds)
+        if len(parts) == 2:
+            minutes, seconds = parts
+            return (int(minutes) * 60) + float(seconds)
+    except ValueError:
+        return None
+    return None
+
+
+def strip_caption_noise(raw_text: str) -> str:
+    cleaned = []
+    for line in raw_text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.upper() == "WEBVTT" or stripped.isdigit() or "-->" in stripped:
+            continue
+        cleaned.append(stripped)
+    return " ".join(cleaned)
 
 
 def parse_int(value: Any) -> int | None:

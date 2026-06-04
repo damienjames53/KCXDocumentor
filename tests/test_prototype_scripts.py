@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 QA_SCRIPT = ROOT / "scripts" / "qa_document_artifacts.py"
 DOCX_HELPER = ROOT / "tools" / "document_lib" / "keycentrix_docx.py"
 GUIDE_DRAFT_SCRIPT = ROOT / "scripts" / "generate_guide_draft.py"
+PROCESS_RECORDING_SCRIPT = ROOT / "scripts" / "process_recording.py"
 
 
 def load_module(path: Path, name: str):
@@ -235,6 +236,61 @@ def test_deterministic_guide_draft_generator_preserves_review_flags(tmp_path: Pa
     assert draft["steps"][0]["instruction"].startswith("Click Save")
     assert draft["steps"][0]["needsHumanReview"] is True
     assert draft["reviewFlags"][0]["segmentId"] == "seg-0001"
+
+
+def test_process_recording_accepts_sidecar_transcript_without_media_tools(tmp_path: Path) -> None:
+    recording = tmp_path / "sample.mp4"
+    transcript = tmp_path / "sample-transcript.txt"
+    output_root = tmp_path / "processed"
+    session_id = "sidecar-demo"
+    recording.write_bytes(b"not a real video")
+    transcript.write_text(
+        "Open the customer record. Click Save after reviewing the address. Confirm the success message.",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(PROCESS_RECORDING_SCRIPT),
+            str(recording),
+            "--no-media-tools",
+            "--transcript",
+            str(transcript),
+            "--output-root",
+            str(output_root),
+            "--session-id",
+            session_id,
+            "--target-application",
+            "Enterprise Rx",
+            "--assume-duration-seconds",
+            "120",
+            "--segment-seconds",
+            "60",
+            "--max-frames",
+            "4",
+        ],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    session_dir = output_root / session_id
+    transcript_payload = json.loads((session_dir / "transcript.json").read_text(encoding="utf-8"))
+    trace_payload = json.loads((session_dir / "procedure_trace.json").read_text(encoding="utf-8"))
+
+    assert transcript_payload["source"] == "sidecar-transcript"
+    assert len(transcript_payload["segments"]) == 2
+    assert all(segment["source"] == "sidecar-transcript" for segment in transcript_payload["segments"])
+    assert "Click Save" in " ".join(segment["text"] for segment in transcript_payload["segments"])
+    assert trace_payload["recording"]["targetApplication"] == "Enterprise Rx"
+    assert len(trace_payload["segments"]) == 2
+    assert trace_payload["segments"][0]["confidence"]["transcript"] >= 0.7
+    assert trace_payload["segments"][0]["confidence"]["ocr"] < 0.7
+    assert trace_payload["segments"][0]["confidence"]["frameSelection"] < 0.7
+    assert trace_payload["segments"][0]["confidence"]["needsHumanReview"] is True
 
 
 @pytest.mark.parametrize(
