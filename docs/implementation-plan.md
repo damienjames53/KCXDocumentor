@@ -22,6 +22,8 @@ The MVP consumes pre-recorded files rather than recording the screen itself.
 10. Render the final guide as DOCX using the local keycentrix document assets.
 11. Run deterministic artifact QA before the guide is considered usable.
 
+The initial testing surface is a local web console served by the Python stdlib app server. This is a prototype and review surface, not the final product shell. If KCXDocumentor becomes a full web client, thick Windows client, or hybrid desktop app, its visual language should continue to follow the `CustomerAppUI` reference standard.
+
 ## Recommended Stack
 
 | Layer | Recommendation | Reason |
@@ -36,6 +38,20 @@ The MVP consumes pre-recorded files rather than recording the screen itself.
 | Trace format | JSON files plus asset folder | Small, inspectable, easy to replay in tests |
 | DOCX rendering | Open XML SDK long term; local `python-docx` helper for prototype | Deterministic document output with local keycentrix styling |
 | AI provider | Anthropic Claude Sonnet 4.6 by default | Strong long-context and document-generation fit while keeping provider/model configurable |
+| UI standard | CustomerAppUI semantic tokens and primitives | Keeps KCXDocumentor aligned with current KCX product UI conventions |
+
+## UI Direction
+
+Use `/Users/djames/Documents/AppDev/CustomerAppUI` as a read-only reference for UI decisions. Do not modify that project from KCXDocumentor.
+
+Current local app direction:
+
+- Keep the first testing app as a lightweight local web console.
+- Use CustomerAppUI-style semantic CSS tokens: `--kcx-ui-*`.
+- Prefer the CustomerAppUI primitive concepts: panels, buttons, status badges, app/top shell, form fields, and layout grids.
+- Avoid one-off palettes, component forks, or custom CSS injection patterns.
+- If the product moves to a thick Windows client, keep the same information architecture and visual semantics where practical.
+- If the product moves to a full web client, consider adopting CustomerAppUI packages or copying the required token/style artifacts locally rather than depending on the reference repo path.
 
 ## One-Hour Recording Strategy
 
@@ -108,6 +124,8 @@ Add a lightweight review surface before AI guide generation. The review surface 
 
 This can start as a local web page that reads `procedure_trace.json` and writes review decisions back into the trace.
 
+The review surface should use the CustomerAppUI visual standard even during the prototype stage so the workflow can graduate into either a web client or Windows client without rethinking the product ergonomics.
+
 ## Milestones
 
 ### Phase 1 - Isolated Planning Repo
@@ -120,6 +138,8 @@ This can start as a local web page that reads `procedure_trace.json` and writes 
 ### Phase 2 - Processing Prototype
 
 - Implement recording import.
+- Add local web console import controls for recordings and transcript sidecars.
+- Surface FFmpeg/FFprobe readiness in the app before processing.
 - Extract audio and low-FPS frame candidates.
 - Add local STT command integration.
 - Add duplicate frame scoring and OCR.
@@ -151,3 +171,4 @@ Every trace includes `schemaVersion`. Future breaking changes should add a migra
 - Add WinUI target-window selector.
 - Capture selected app window and microphone audio.
 - Produce pipeline-native assets without manual transcoding.
+- Preserve CustomerAppUI design semantics in the Windows shell through equivalent tokens, spacing, panel, button, status, and form patterns.
