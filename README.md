@@ -108,3 +108,16 @@ KCXDOC_WHISPER_UPDATE=latest
 The browser URL remains `http://127.0.0.1:8765`; Docker maps the container's internal `8765` port to the same host port. Use `docker compose ps` and `docker compose logs -f kcxdocumentor` for status.
 
 See `docs/containerization.md` for runtime Whisper bootstrap behavior, offline/preseeded options, health-check output, and macOS path examples.
+
+The private GitHub Container Registry image is published as:
+
+```text
+ghcr.io/damienjames53/kcxdocumentor:dev
+```
+
+Authenticate before pulling the private image:
+
+```bash
+echo <github-classic-pat-with-read-packages> | docker login ghcr.io -u damienjames53 --password-stdin
+docker pull ghcr.io/damienjames53/kcxdocumentor:dev
+```

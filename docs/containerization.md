@@ -68,9 +68,25 @@ KCXDOC_WHISPER_UPDATE=latest
 
 ## Run
 
+Build locally:
+
 ```bash
 docker compose build
 docker compose up -d
+```
+
+Or pull the private GitHub Container Registry image after authenticating to GHCR:
+
+```bash
+echo <github-classic-pat-with-read-packages> | docker login ghcr.io -u damienjames53 --password-stdin
+docker compose pull
+docker compose up -d
+```
+
+The image name is:
+
+```text
+ghcr.io/damienjames53/kcxdocumentor:dev
 ```
 
 Watch first-start bootstrap logs:
