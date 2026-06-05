@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import sqlite3
 import subprocess
@@ -215,6 +216,7 @@ def test_build_guide_docx_accepts_section_based_anthropic_shape(tmp_path: Path) 
     text = "\n".join(paragraph.text for paragraph in doc.paragraphs)
     assert "Overview of Communication Methods" in text
     assert "Note that SendKey supports fax" in text
+    assert "Action:" not in text
     assert "Screenshots require human approval" not in text
     with ZipFile(output_path) as package:
         comments_xml = package.read("word/comments.xml").decode("utf-8")
@@ -457,6 +459,88 @@ def test_build_guide_docx_replaces_internal_purpose_and_prerequisite_language(tm
     assert "before publishing" not in body_text
     assert "application reviewer" not in body_text
     assert "You have access to Blink Rx and the permissions needed to complete this workflow." in body_text
+
+
+def test_build_guide_docx_moves_candidate_screenshot_language_to_comments(tmp_path: Path) -> None:
+    image_path = tmp_path / "workflow.png"
+    if Image is not None:
+        Image.new("RGB", (320, 180), color=(245, 245, 245)).save(image_path)
+    else:
+        image_path.write_bytes(b"not-a-real-image")
+    input_path = tmp_path / "candidate-language-draft.json"
+    output_path = tmp_path / "candidate-language-guide.docx"
+    input_path.write_text(
+        json.dumps(
+            {
+                "title": "Workflow Review Guide",
+                "status": "Prototype",
+                "summary": "This prototype guide covers the candidate screenshot workflow.",
+                "steps": [
+                    {
+                        "title": "Candidate screenshot must be selected",
+                        "instruction": "Candidate screenshot at 00:01:00 shows the settings page.",
+                        "expectedResult": "No screenshot was available for this procedure step.",
+                        "screenshot": str(image_path),
+                        "caption": "Candidate screenshot at 00:01:00",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(BUILD_GUIDE_DOCX_SCRIPT), str(input_path), "--output", str(output_path)],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    doc = Document(output_path)
+    body_text = "\n".join(paragraph.text for paragraph in doc.paragraphs)
+    assert "Prototype" not in body_text
+    assert "prototype" not in body_text
+    assert "Candidate screenshot" not in body_text
+    assert "candidate screenshot" not in body_text
+    assert "No screenshot was available" not in body_text
+    assert "Final Revision for Review" in body_text
+    with ZipFile(output_path) as package:
+        comments_xml = package.read("word/comments.xml").decode("utf-8")
+    assert "Candidate screenshot at 00:01:00" in comments_xml
+    assert "No screenshot was available for this procedure step." in comments_xml
+
+
+def test_build_guide_docx_infers_contextual_audience(tmp_path: Path) -> None:
+    input_path = tmp_path / "audience-draft.json"
+    output_path = tmp_path / "audience-guide.docx"
+    input_path.write_text(
+        json.dumps(
+            {
+                "title": "Blink Rx Training Guide",
+                "document": {"targetApplication": "Blink Rx"},
+                "audience": ["Application users"],
+                "summary": "This guide covers refill and pharmacy profile workflows in Blink Rx.",
+                "steps": [{"title": "Open the profile", "instruction": "Open the pharmacy profile."}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(BUILD_GUIDE_DOCX_SCRIPT), str(input_path), "--output", str(output_path)],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    body_text = "\n".join(paragraph.text for paragraph in Document(output_path).paragraphs)
+    assert "Application users" not in body_text
+    assert "Trainers and team members learning the workflow" in body_text
+    assert "Pharmacy workflow team members who complete or support the documented process" in body_text
 
 
 def test_build_guide_docx_omits_generation_metadata_from_delivered_docx(tmp_path: Path) -> None:
@@ -708,7 +792,7 @@ def test_artifact_qa_reports_reviewer_comments_and_body_cleanliness(tmp_path: Pa
     assert any("reviewer comments" in warning.lower() for warning in artifact["warnings"])
 
 
-def test_artifact_qa_rejects_prompt_or_reasoning_leaks_in_comments(tmp_path: Path) -> None:
+def test_build_guide_docx_sanitizes_prompt_language_in_reviewer_comments(tmp_path: Path) -> None:
     input_path = tmp_path / "leaky-comment-draft.json"
     output_path = tmp_path / "leaky-comment-guide.docx"
     input_path.write_text(
@@ -742,6 +826,39 @@ def test_artifact_qa_rejects_prompt_or_reasoning_leaks_in_comments(tmp_path: Pat
 
     result = subprocess.run(
         [sys.executable, str(QA_SCRIPT), "--json", str(output_path)],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    with ZipFile(output_path) as package:
+        comments_xml = package.read("word/comments.xml").decode("utf-8")
+    assert "system prompt" not in comments_xml
+    assert "application message" in comments_xml
+
+
+def test_artifact_qa_rejects_prompt_or_reasoning_leaks_in_comments(tmp_path: Path) -> None:
+    docx_path = tmp_path / "raw-leaky-comment.docx"
+    doc = Document()
+    for paragraph in [
+        "keycentrix user guide",
+        "Purpose",
+        "Intended Audience",
+        "Workflow Overview",
+        "Step-by-Step Procedures",
+        "Expected Results",
+        "Troubleshooting",
+        "Source Recording",
+    ]:
+        doc.add_paragraph(paragraph)
+    anchor = doc.add_paragraph("Review and save the record.")
+    doc.add_comment(anchor.runs, text="The system prompt should decide this action.", author="KCXDocumentor Reviewer")
+    doc.save(docx_path)
+
+    result = subprocess.run(
+        [sys.executable, str(QA_SCRIPT), "--json", str(docx_path)],
         cwd=ROOT,
         check=False,
         text=True,
@@ -792,7 +909,7 @@ def test_compact_procedure_trace_contract_for_one_hour_recordings(tmp_path: Path
     assert loaded["steps"][0]["candidate_images"][0].endswith(".webp")
 
 
-def test_guide_draft_generator_requires_anthropic_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_guide_draft_generator_requires_remote_proxy_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_module(GUIDE_DRAFT_SCRIPT, "generate_guide_draft_anthropic_required")
     trace = {
         "schemaVersion": 1,
@@ -819,9 +936,9 @@ def test_guide_draft_generator_requires_anthropic_key(tmp_path: Path, monkeypatc
             }
         ],
     }
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("KCXDOC_REMOTE_API_BASE_URL", raising=False)
 
-    with pytest.raises(SystemExit, match="ANTHROPIC_API_KEY is required"):
+    with pytest.raises(SystemExit, match="KCXDOC_REMOTE_API_BASE_URL is required"):
         module.generate_with_anthropic(
             trace,
             type(
@@ -897,19 +1014,25 @@ def test_anthropic_payload_excludes_rejected_frame_candidates_but_keeps_notes(mo
         def read(self) -> bytes:
             return json.dumps(
                 {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": json.dumps({"title": "Guide", "steps": []}),
-                        }
-                    ],
-                    "usage": {"input_tokens": 12847, "output_tokens": 3201},
+                    "anthropicResult": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": json.dumps({"title": "Guide", "steps": []}),
+                            }
+                        ],
+                        "usage": {"input_tokens": 12847, "output_tokens": 3201},
+                    },
+                    "generationReport": {
+                        "generationRunId": "run-123",
+                        "generatedAt": "2026-06-04T16:34:09Z",
+                    },
                 }
             ).encode("utf-8")
 
     def fake_urlopen(req, timeout):
         payload = json.loads(req.data.decode("utf-8"))
-        user_prompt = json.loads(payload["messages"][0]["content"])
+        user_prompt = json.loads(payload["anthropic"]["messages"][0]["content"])
         captured["procedureTrace"] = user_prompt["procedureTrace"]
         return FakeResponse()
 
@@ -936,7 +1059,8 @@ def test_anthropic_payload_excludes_rejected_frame_candidates_but_keeps_notes(mo
             }
         ],
     }
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("KCXDOC_REMOTE_API_BASE_URL", "https://kcxdocumentor-ai-dev.azurewebsites.net")
+    monkeypatch.setenv("KCXDOC_REMOTE_API_BEARER_TOKEN", "token-123")
     monkeypatch.setattr(module.request, "urlopen", fake_urlopen)
 
     draft = module.generate_with_anthropic(
@@ -963,6 +1087,7 @@ def test_anthropic_payload_excludes_rejected_frame_candidates_but_keeps_notes(mo
     assert procedure_trace["excludedFrames"][0]["frameId"] == "reject-me"
     assert "Rejected because it shows meeting controls." in json.dumps(procedure_trace["reviewGuidance"])
     assert draft["generatedAt"].endswith("Z")
+    assert draft["generationRunId"] == "run-123"
     assert draft["model"]["model"] == "claude-sonnet-4-6"
     assert draft["usage"] == {
         "inputTokens": 12847,
@@ -1016,24 +1141,7 @@ def test_generation_report_is_written_next_to_anthropic_draft(tmp_path: Path) ->
     }
     expected["generationRunId"] = module.generation_run_id(expected)
     assert report == expected
-    with sqlite3.connect(module.USAGE_DB_PATH) as connection:
-        row = connection.execute(
-            """
-            SELECT generation_run_id, session_id, input_tokens, output_tokens,
-                   total_tokens, estimated_cost_usd, status, error_message
-            FROM generation_usage
-            """
-        ).fetchone()
-    assert row == (
-        expected["generationRunId"],
-        "demo-session",
-        12847,
-        3201,
-        16048,
-        0.086556,
-        "succeeded",
-        "",
-    )
+    assert not module.USAGE_DB_PATH.exists()
 
 
 def test_anthropic_invalid_json_records_failed_usage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1056,13 +1164,39 @@ def test_anthropic_invalid_json_records_failed_usage(tmp_path: Path, monkeypatch
         def read(self) -> bytes:
             return json.dumps(
                 {
-                    "content": [{"type": "text", "text": '{"title":"Unfinished"'}],
-                    "usage": {"input_tokens": 2000, "output_tokens": 500},
+                    "anthropicResult": {
+                        "content": [{"type": "text", "text": '{"title":"Unfinished"'}],
+                        "usage": {"input_tokens": 2000, "output_tokens": 500},
+                    },
+                    "generationReport": {
+                        "schemaVersion": 1,
+                        "status": "succeeded",
+                        "generatedAt": "2026-06-04T16:34:09Z",
+                        "sessionId": "failed-session",
+                        "title": "Failed guide generation",
+                        "model": "claude-sonnet-4-6",
+                        "provider": "anthropic",
+                        "promptVersion": "guide-draft-v1",
+                        "generationRunId": "failed-run-123",
+                        "usage": {
+                            "inputTokens": 2000,
+                            "outputTokens": 500,
+                            "totalTokens": 2500,
+                            "estimatedCostUSD": 0.0135,
+                        },
+                    },
                 }
             ).encode("utf-8")
 
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    monkeypatch.setattr(module.request, "urlopen", lambda req, timeout: FakeResponse())
+    requests: list[str] = []
+
+    def fake_urlopen(req, timeout):
+        requests.append(str(req.full_url))
+        return FakeResponse()
+
+    monkeypatch.setenv("KCXDOC_REMOTE_API_BASE_URL", "https://kcxdocumentor-ai-dev.azurewebsites.net")
+    monkeypatch.setenv("KCXDOC_REMOTE_API_BEARER_TOKEN", "token-123")
+    monkeypatch.setattr(module.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(sys, "argv", ["generate_guide_draft.py", str(trace_path), "--output", str(output_path)])
 
     result = module.main()
@@ -1073,6 +1207,7 @@ def test_anthropic_invalid_json_records_failed_usage(tmp_path: Path, monkeypatch
     failure = json.loads(failure_path.read_text(encoding="utf-8"))
     assert failure["status"] == "failed"
     assert failure["sessionId"] == "failed-session"
+    assert failure["generationRunId"] == "failed-run-123"
     assert failure["usage"] == {
         "inputTokens": 2000,
         "outputTokens": 500,
@@ -1080,18 +1215,93 @@ def test_anthropic_invalid_json_records_failed_usage(tmp_path: Path, monkeypatch
         "estimatedCostUSD": 0.0135,
     }
     assert "invalid guide JSON" in failure["errorMessage"]
-    with sqlite3.connect(module.USAGE_DB_PATH) as connection:
-        row = connection.execute(
-            """
-            SELECT session_id, total_tokens, estimated_cost_usd, status, error_message
-            FROM generation_usage
-            """
-        ).fetchone()
-    assert row[0] == "failed-session"
-    assert row[1] == 2500
-    assert row[2] == 0.0135
-    assert row[3] == "failed"
-    assert "invalid guide JSON" in row[4]
+    assert requests == [
+        "https://kcxdocumentor-ai-dev.azurewebsites.net/api/generate-draft",
+        "https://kcxdocumentor-ai-dev.azurewebsites.net/api/usage-records",
+    ]
+
+
+def test_anthropic_http_error_writes_failure_without_traceback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_module(GUIDE_DRAFT_SCRIPT, "generate_guide_draft_http_failure")
+    module.USAGE_DB_PATH = tmp_path / "usage" / "generation_usage.sqlite3"
+    trace_path = tmp_path / "procedure_trace.json"
+    output_path = tmp_path / "generated" / "guide_draft.anthropic.json"
+    trace_path.write_text(
+        json.dumps({"schemaVersion": 1, "sessionId": "http-failed-session", "segments": []}),
+        encoding="utf-8",
+    )
+
+    def raise_http_error(req, timeout):
+        body = json.dumps(
+            {
+                "error": "Anthropic API request failed: HTTP 429 (rate_limit_error): Requests are temporarily limited.",
+                "generationReport": {
+                    "schemaVersion": 1,
+                    "status": "failed",
+                    "generatedAt": "2026-06-04T16:34:09Z",
+                    "sessionId": "http-failed-session",
+                    "title": "Failed guide generation",
+                    "model": "claude-sonnet-4-6",
+                    "provider": "anthropic",
+                    "promptVersion": "guide-draft-v1",
+                    "generationRunId": "http-failed-run",
+                    "usage": {
+                        "inputTokens": 0,
+                        "outputTokens": 0,
+                        "totalTokens": 0,
+                        "estimatedCostUSD": 0,
+                    },
+                    "errorMessage": "Anthropic API request failed: HTTP 429 (rate_limit_error): Requests are temporarily limited.",
+                },
+            }
+        ).encode("utf-8")
+        raise module.error.HTTPError(str(req.full_url), 429, "Too Many Requests", {}, io.BytesIO(body))
+
+    monkeypatch.setenv("KCXDOC_REMOTE_API_BASE_URL", "https://kcxdocumentor-ai-dev.azurewebsites.net")
+    monkeypatch.setenv("KCXDOC_REMOTE_API_BEARER_TOKEN", "token-123")
+    monkeypatch.setattr(module.request, "urlopen", raise_http_error)
+    monkeypatch.setattr(sys, "argv", ["generate_guide_draft.py", str(trace_path), "--output", str(output_path)])
+
+    result = module.main()
+
+    assert result == 1
+    failure_path = output_path.parent / "generation_failure.json"
+    failure = json.loads(failure_path.read_text(encoding="utf-8"))
+    assert failure["status"] == "failed"
+    assert failure["sessionId"] == "http-failed-session"
+    assert failure["usage"]["totalTokens"] == 0
+    assert "HTTP 429" in failure["errorMessage"]
+    assert "rate_limit_error" in failure["errorMessage"]
+    assert "Traceback" not in failure["errorMessage"]
+
+
+def test_anthropic_network_error_writes_failure_without_traceback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_module(GUIDE_DRAFT_SCRIPT, "generate_guide_draft_network_failure")
+    module.USAGE_DB_PATH = tmp_path / "usage" / "generation_usage.sqlite3"
+    trace_path = tmp_path / "procedure_trace.json"
+    output_path = tmp_path / "generated" / "guide_draft.anthropic.json"
+    trace_path.write_text(
+        json.dumps({"schemaVersion": 1, "sessionId": "network-failed-session", "segments": []}),
+        encoding="utf-8",
+    )
+
+    def raise_network_error(req, timeout):
+        raise module.error.URLError("connection reset")
+
+    monkeypatch.setenv("KCXDOC_REMOTE_API_BASE_URL", "https://kcxdocumentor-ai-dev.azurewebsites.net")
+    monkeypatch.setenv("KCXDOC_REMOTE_API_BEARER_TOKEN", "token-123")
+    monkeypatch.setattr(module.request, "urlopen", raise_network_error)
+    monkeypatch.setattr(sys, "argv", ["generate_guide_draft.py", str(trace_path), "--output", str(output_path)])
+
+    result = module.main()
+
+    assert result == 1
+    failure = json.loads((output_path.parent / "generation_failure.json").read_text(encoding="utf-8"))
+    assert failure["status"] == "failed"
+    assert failure["sessionId"] == "network-failed-session"
+    assert failure["usage"]["totalTokens"] == 0
+    assert "failed before a complete response" in failure["errorMessage"]
+    assert "Traceback" not in failure["errorMessage"]
 
 
 def test_app_server_summarizes_generation_usage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1117,6 +1327,7 @@ def test_app_server_summarizes_generation_usage(monkeypatch: pytest.MonkeyPatch,
         json.dumps(
             {
                 "schemaVersion": 1,
+                "title": "Blink Rx Integration: Workflow Guide",
                 "generatedAt": "2026-06-04T16:34:09Z",
                 "model": "claude-sonnet-4-6",
                 "provider": "anthropic",
@@ -1138,6 +1349,7 @@ def test_app_server_summarizes_generation_usage(monkeypatch: pytest.MonkeyPatch,
     session = module.read_session(session_dir)
 
     assert session["generation"] == {
+        "title": "Blink Rx Integration: Workflow Guide",
         "model": "claude-sonnet-4-6",
         "provider": "anthropic",
         "promptVersion": "guide-draft-v1",
@@ -1146,6 +1358,7 @@ def test_app_server_summarizes_generation_usage(monkeypatch: pytest.MonkeyPatch,
         "outputTokens": 3201,
         "totalTokens": 16048,
         "estimatedCostUSD": 0.086556,
+        "pageCount": 0,
         "status": "succeeded",
         "errorMessage": "",
     }

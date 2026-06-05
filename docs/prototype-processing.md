@@ -116,11 +116,11 @@ python3 scripts/process_recording.py samples/raw/example.mp4 \
   --whisper-model models/whisper/ggml-base.en.bin
 ```
 
-The default model path is `models/whisper/ggml-base.en.bin`. The generated Whisper JSON is stored at `audio/whisper-transcript.json`, and normalized transcript segments are written into `transcript.json` with `source: local-whisper`.
+The default model path is `models/whisper/ggml-base.en.bin`, or `KCXDOC_WHISPER_MODEL` when that environment variable is set. The generated Whisper JSON is stored at `audio/whisper-transcript.json`, and normalized transcript segments are written into `transcript.json` with `source: local-whisper`.
 
 Useful options:
 
-- `--whisper-cli` points to a specific `whisper-cli` binary.
+- `--whisper-cli` points to a specific `whisper-cli` binary. If omitted, the script uses `KCXDOC_WHISPER_CLI` or `whisper-cli` on `PATH`.
 - `--whisper-language` defaults to `en`.
 - `--whisper-timeout-seconds` defaults to `7200` for long recordings.
 - `--no-local-stt` skips Whisper and keeps deterministic placeholder transcript output.

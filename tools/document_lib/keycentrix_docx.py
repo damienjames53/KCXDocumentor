@@ -11,10 +11,7 @@ from docx.shared import Inches, Pt, RGBColor
 
 WORKSPACE = Path(__file__).resolve().parents[2]
 SHARED_IMAGES = WORKSPACE / "assets" / "branding" / "images"
-TEMPLATE_LOGO = SHARED_IMAGES / "keycentrix-template-logo.png"
-FULL_LOGO = SHARED_IMAGES / "keycentrix-full-logo.png"
-FALLBACK_LOGO = SHARED_IMAGES / "sticky-logo.png"
-LOGO = TEMPLATE_LOGO if TEMPLATE_LOGO.exists() else (FULL_LOGO if FULL_LOGO.exists() else FALLBACK_LOGO)
+LOGO = SHARED_IMAGES / "keycentrix-logo.png"
 
 FONT = "Calibri"
 INK = RGBColor(0x1F, 0x29, 0x37)

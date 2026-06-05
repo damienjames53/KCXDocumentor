@@ -4,9 +4,9 @@ KCXDocumentor includes a tiny Python stdlib server for early end-to-end testing.
 
 ## UI Standard
 
-The current prototype is a local web console. If this evolves into a thicker Windows client or a full web client, the visual language should still follow the read-only `CustomerAppUI` reference project.
+The current prototype is a local web console. If this evolves into a thicker Windows client or a full web client, the visual language should still follow the read-only `KCXUIComponents` reference project.
 
-Current local CSS uses the CustomerAppUI semantic token model as the source of truth:
+Current local CSS uses the KCXUIComponents semantic token model as the source of truth:
 
 - `--kcx-ui-color-page`
 - `--kcx-ui-color-surface`
@@ -17,7 +17,7 @@ Current local CSS uses the CustomerAppUI semantic token model as the source of t
 - `--kcx-ui-radius-*`
 - `--kcx-ui-shadow-*`
 
-Avoid one-off palettes or component forks. New controls should map to CustomerAppUI-style primitives: panels, buttons, status badges, form fields, top/app shell, and layout grids.
+Avoid one-off palettes or component forks. New controls should map to KCXUIComponents-style primitives: panels, buttons, status badges, form fields, top/app shell, and layout grids.
 
 Run it from the repo root:
 
@@ -25,11 +25,33 @@ Run it from the repo root:
 python3 scripts/app_server.py --host 127.0.0.1 --port 8765
 ```
 
+For Docker-based local testing, stop any existing Python server on port `8765`, then run:
+
+```bash
+docker compose up -d --build
+```
+
+Docker uses the same browser URL as the Python process. The container listens internally on `0.0.0.0:8765`, and Compose maps it to `http://127.0.0.1:8765`.
+
 Open:
 
 ```text
 http://127.0.0.1:8765
 ```
+
+The local console is protected with Microsoft Entra MSAL + PKCE when `KCXDOC_AUTH_ENABLED=true`.
+Auth settings are loaded from the repo-local ignored `.env` file:
+
+```text
+KCXDOC_AUTH_TENANT_ID=543e31cf-f2b9-457e-88af-82a3938c2913
+KCXDOC_AUTH_CLIENT_ID=9d5d6572-b583-4df9-8fe6-8f96c71fad58
+KCXDOC_AUTH_AUTHORITY=https://login.microsoftonline.com/543e31cf-f2b9-457e-88af-82a3938c2913
+KCXDOC_AUTH_REDIRECT_URI=http://127.0.0.1:8765/
+KCXDOC_AUTH_POST_LOGOUT_REDIRECT_URI=http://127.0.0.1:8765/
+KCXDOC_AUTH_SCOPES=openid profile
+```
+
+After sign-in, the browser sends a validated Entra token to the local server and receives a short-lived HttpOnly local session cookie. API routes, screenshot assets, and the video reviewer are protected by that session. Use **Logout** in the header to clear both the MSAL session and the local app session.
 
 If `web/index.html` does not exist yet, static root requests will return a 404 JSON response. The API endpoints still work.
 
@@ -45,6 +67,8 @@ The console is organized around the shortest safe path to a reviewable guide:
 6. Choose **Download DOCX** or use the DOCX download link in the Artifacts tab. Use **Re-run QA** as a secondary status check after guide or screenshot changes.
 
 ## Endpoints
+
+Except for `/api/auth-config`, `/api/auth-session`, `/api/logout`, and `/api/health`, API endpoints require authentication when local auth is enabled. Browser requests are handled by the MSAL login flow. Direct `curl` testing must include a valid bearer token or temporarily set `KCXDOC_AUTH_ENABLED=false` in `.env` for local-only diagnostics.
 
 `POST /api/import-recording`
 
@@ -153,13 +177,23 @@ Runs `scripts/generate_guide_draft.py` against `samples/processed/<sessionId>/pr
 }
 ```
 
-The underlying script uses `ANTHROPIC_API_KEY` from the process environment or `.env`. The server does not print environment variables or secrets.
+The underlying script sends the compact prompt payload to the Azure Function configured in `KCXDOC_REMOTE_API_BASE_URL`. The local app does not call Anthropic directly after the serverless transition. `ANTHROPIC_API_KEY` belongs on the Function App only.
 
 When `artifacts/generated/<sessionId>/guide_draft.anthropic.json` includes Anthropic generation metadata such as `model`, `generatedAt`, and `usage`, the local console surfaces the model, token totals, estimated cost, and timestamp in the Artifacts view and Readiness checks.
 
 The selected session's current generation token cost remains visible in the Artifacts tab after the draft metadata is available. Aggregate token reporting lives on the top-level **AI Spend** page in the main navigation, with the current calendar month spend also visible in the header.
 
-Generation usage is persisted in the local SQLite database at `artifacts/usage/generation_usage.sqlite3`. This database is outside the processed session and generated artifact folders, so **Delete Session** removes the working artifacts but does not erase historical token/cost reporting.
+Generation usage is persisted in Cosmos DB through the Azure Function. **Delete Session** removes local working artifacts but does not erase historical token/cost reporting.
+
+Set `KCXDOC_REMOTE_API_BASE_URL` to the Function App base URL, such as `https://kcxdocumentor-ai-dev.azurewebsites.net`. If the remote API is unset or unavailable, guide generation and AI Spend reporting fail visibly instead of falling back to stale local data.
+
+To prepare existing legacy SQLite records for a one-time remote migration without making any Azure calls:
+
+```bash
+python3 scripts/app_server.py --export-usage-json artifacts/usage/usage-export.json
+```
+
+Omit the output path, or pass `-`, to write the export JSON to stdout.
 
 `GET /api/usage-summary?range=<day|week|month|year>`
 
@@ -178,6 +212,8 @@ Expected response:
     "inputTokens": 42000,
     "outputTokens": 8600,
     "totalTokens": 50600,
+    "pageCount": 12,
+    "costPerPageUSD": 0.072675,
     "estimatedCostUSD": 0.8721
   },
   "buckets": [
@@ -190,14 +226,35 @@ Expected response:
         "inputTokens": 14000,
         "outputTokens": 2800,
         "totalTokens": 16800,
+        "pageCount": 4,
+        "costPerPageUSD": 0.072675,
         "estimatedCostUSD": 0.2907
-      }
+      },
+      "documents": [
+        {
+          "sessionId": "blink-rx-part-2",
+          "title": "Blink Rx Workflow Guide",
+          "generatedAt": "2026-06-04T15:30:00Z",
+          "generatedBy": {
+            "oid": "00000000-0000-0000-0000-000000000000",
+            "name": "Damien James",
+            "username": "damien.james@example.com"
+          },
+          "status": "succeeded",
+          "usage": {
+            "totalTokens": 16800,
+            "pageCount": 4,
+            "estimatedCostUSD": 0.2907,
+            "costPerPageUSD": 0.072675
+          }
+        }
+      ]
     }
   ]
 }
 ```
 
-Each bucket document entry includes `status` and `errorMessage`. Failed attempts are included in token and cost totals, but they do not increment the successful `documents` count. The response also includes `days` for compatibility when the selected range is `day`. If the endpoint is not available yet, the dashboard leaves usage metrics blank and shows a non-blocking empty state.
+Each bucket document entry includes `generatedBy`, `status`, and `errorMessage`. Failed attempts are included in token and cost totals, but they do not increment the successful `documents` count. The response also includes `days` for compatibility when the selected range is `day`. If the endpoint is not available yet, the dashboard leaves usage metrics blank and shows a non-blocking empty state.
 
 `POST /api/build-docx`
 
@@ -347,6 +404,6 @@ curl 'http://127.0.0.1:8765/api/usage-summary?range=week'
 ```
 
 Generated outputs are written under `artifacts/generated/<sessionId>/`.
-Generation usage metadata is retained in JSON artifacts, SQLite reporting, and the local console. It is intentionally omitted from delivered DOCX guides.
+Generation usage metadata is retained in JSON artifacts, Cosmos-backed AI Spend reporting, and the local console. It is intentionally omitted from delivered DOCX guides.
 
-Use **Delete Session** in the local UI when a processed recording or generated output has been removed and the stale session still appears in the session list. The control removes the processed session and matching generated artifacts, refreshes the session list, leaves files in `samples/raw` untouched, and preserves `artifacts/usage/generation_usage.sqlite3` for usage reporting.
+Use **Delete Session** in the local UI when a processed recording or generated output has been removed and the stale session still appears in the session list. The control removes the processed session and matching generated artifacts, refreshes the session list, leaves files in `samples/raw` untouched, and preserves Cosmos-backed AI Spend history.

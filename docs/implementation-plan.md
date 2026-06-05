@@ -23,7 +23,7 @@ The MVP consumes pre-recorded files rather than recording the screen itself.
 11. Render the final guide as DOCX using the local keycentrix document assets.
 12. Run deterministic artifact QA and rendered visual QA before the guide is considered usable.
 
-The initial testing surface is a local web console served by the Python stdlib app server. This is a prototype and review surface, not the final product shell. If KCXDocumentor becomes a full web client, thick Windows client, or hybrid desktop app, its visual language should continue to follow the `CustomerAppUI` reference standard.
+The initial testing surface is a local web console served by the Python stdlib app server. This is a prototype and review surface, not the final product shell. If KCXDocumentor becomes a full web client, thick Windows client, or hybrid desktop app, its visual language should continue to follow the `KCXUIComponents` reference standard.
 
 ## Recommended Stack
 
@@ -39,22 +39,23 @@ The initial testing surface is a local web console served by the Python stdlib a
 | Trace format | JSON files plus asset folder | Small, inspectable, easy to replay in tests |
 | DOCX rendering | Open XML SDK long term; local `python-docx` helper for prototype | Deterministic document output with local keycentrix styling |
 | AI provider | Anthropic Claude Sonnet 4.6 by default | Strong long-context and document-generation fit while keeping provider/model configurable |
-| UI standard | CustomerAppUI semantic tokens and primitives | Keeps KCXDocumentor aligned with current KCX product UI conventions |
+| UI standard | KCXUIComponents semantic tokens and primitives | Keeps KCXDocumentor aligned with current KCX product UI conventions |
+| Local container | Docker Compose with host-mounted folders | Keeps the internal app easy to run while preserving workstation-local recordings and generated artifacts |
 
 ## UI Direction
 
-Use `/Users/djames/Documents/AppDev/CustomerAppUI` as a read-only reference for UI decisions. Do not modify that project from KCXDocumentor.
+Use `/Users/djames/Documents/AppDev/KCXUIComponents` as a read-only reference for UI decisions. Do not modify that project from KCXDocumentor.
 
 Current local app direction:
 
 - Keep the first testing app as a lightweight local web console.
-- Use CustomerAppUI-style semantic CSS tokens: `--kcx-ui-*`.
-- Prefer the CustomerAppUI primitive concepts: panels, buttons, status badges, app/top shell, form fields, and layout grids.
+- Use KCXUIComponents-style semantic CSS tokens: `--kcx-ui-*`.
+- Prefer the KCXUIComponents primitive concepts: panels, buttons, status badges, app/top shell, form fields, and layout grids.
 - Keep per-session generation metadata visible with the selected session's artifacts, including model, generated timestamp, input/output/total tokens, and estimated cost.
 - Provide a separate AI Spend page for aggregate generated-document count and token cost by `day`, `week`, `month`, or `year`, plus a header-level current calendar month spend summary.
 - Avoid one-off palettes, component forks, or custom CSS injection patterns.
 - If the product moves to a thick Windows client, keep the same information architecture and visual semantics where practical.
-- If the product moves to a full web client, consider adopting CustomerAppUI packages or copying the required token/style artifacts locally rather than depending on the reference repo path.
+- If the product moves to a full web client, consider adopting KCXUIComponents packages or copying the required token/style artifacts locally rather than depending on the reference repo path.
 
 ## One-Hour Recording Strategy
 
@@ -69,6 +70,27 @@ One-hour recordings must be treated as large source material, not as prompt cont
 - Use a map-reduce generation pattern: summarize segments first, then compose the full guide.
 - Include transcript, OCR, frame-selection, and overall confidence for every segment.
 - Flag low-confidence stretches for human review instead of letting the AI silently interpolate missing steps.
+
+## Containerization Direction
+
+Package the internal testing app as a local Docker container for repeatable workstation setup. The container should include the Python app, static web console, document tooling, FFmpeg, Tesseract, and build tools required to compile `whisper.cpp`. It should not bundle Whisper binaries or Whisper model files at image build time.
+
+Whisper should be treated as an external local tool share that the container can populate at runtime:
+
+- `KCXDOC_WHISPER_CLI` points to the mounted `whisper-cli` binary.
+- `KCXDOC_WHISPER_MODEL` points to the mounted GGML model.
+- The default container mount is `/opt/kcxdocumentor/external/whisper`.
+- `KCXDOC_BOOTSTRAP_WHISPER=true` lets the entrypoint fetch the latest `whisper.cpp` release source, build `whisper-cli`, download the configured model, and persist both in the mounted share.
+- `KCXDOC_WHISPER_UPDATE=never` disables update checks after the share has been seeded.
+- The mounted share must be writable when runtime bootstrap is enabled.
+
+Source and artifact folders must remain host-mappable:
+
+- `samples/raw` maps to a local source recording folder.
+- `samples/processed` maps to a local processed-session folder.
+- `artifacts` maps to a local generated-output folder.
+
+This keeps large media, generated DOCX files, QA output, and local processing artifacts outside the image and available to the user on Windows and macOS. The Azure Function remains responsible for the Anthropic proxy and persisted AI Spend data.
 
 ## Compact Procedure Trace
 
@@ -127,7 +149,7 @@ Add a lightweight review surface before customer-facing AI guide generation. The
 
 This starts as a local web page that reads the processed session bundle and writes reviewer decisions to `frame_review.json` as an overlay. It should not rewrite the raw extraction outputs.
 
-The review surface should use the CustomerAppUI visual standard even during the prototype stage so the workflow can graduate into either a web client or Windows client without rethinking the product ergonomics.
+The review surface should use the KCXUIComponents visual standard even during the prototype stage so the workflow can graduate into either a web client or Windows client without rethinking the product ergonomics.
 
 The current Blink Rx test showed that Anthropic can produce useful procedure prose, but the generated DOCX is not customer-ready unless the reviewer concerns are handled correctly. Reviewer concerns such as unclear transcript stretches, screenshot approval, UI evidence, source timing, placeholder OCR, and confidence issues must appear in Word comments or reviewer-only fallback sections, not in the visible guide body.
 
@@ -185,6 +207,9 @@ The older Anthropic Blink artifacts are retained only as evidence. They are not 
 - Implement recording import.
 - Add local web console import controls for recordings and transcript sidecars.
 - Surface FFmpeg/FFprobe readiness in the app before processing.
+- Add Docker Compose support with host-mounted `samples/raw`, `samples/processed`, and `artifacts`.
+- Keep Whisper external to the image and resolve it through mounted `KCXDOC_WHISPER_CLI` and `KCXDOC_WHISPER_MODEL` paths.
+- Add runtime Whisper bootstrap for containers so the mounted share can be seeded with the latest `whisper.cpp` CLI and the configured model without rebuilding the app image.
 - Extract audio and low-FPS frame candidates.
 - Add local STT command integration.
 - Add duplicate frame scoring and OCR.
@@ -200,7 +225,7 @@ The older Anthropic Blink artifacts are retained only as evidence. They are not 
 - Include selected screenshots with captions and step references.
 - Keep reviewer concerns in DOCX comments rather than visible guide body text.
 - Run schema validation and basic forbidden-leak/placeholder QA before accepting generated DOCX output.
-- Track generation usage in the local SQLite database at `artifacts/usage/generation_usage.sqlite3` and expose `/api/usage-summary?range=day|week|month|year` using the response shape `{range, generatedAt, totals:{documents,inputTokens,outputTokens,totalTokens,estimatedCostUSD}, buckets:[...]}` so the top-level reporting page can show document count and estimated token cost over time even after individual sessions are deleted.
+- Track generation usage in Cosmos DB through the Azure Function proxy and expose `/api/usage-summary?range=day|week|month|year` using the response shape `{range, generatedAt, totals:{documents,inputTokens,outputTokens,totalTokens,estimatedCostUSD,pageCount,costPerPageUSD}, buckets:[{documents:[{generatedBy,status,usage}]}]}` so the top-level AI Spend page can show document count, generator, pages, and estimated token cost over time even after individual sessions are deleted.
 
 ### Phase 4 - QA/Eval Harness
 
@@ -220,4 +245,4 @@ Every trace includes `schemaVersion`. Future breaking changes should add a migra
 - Add WinUI target-window selector.
 - Capture selected app window and microphone audio.
 - Produce pipeline-native assets without manual transcoding.
-- Preserve CustomerAppUI design semantics in the Windows shell through equivalent tokens, spacing, panel, button, status, and form patterns.
+- Preserve KCXUIComponents design semantics in the Windows shell through equivalent tokens, spacing, panel, button, status, and form patterns.

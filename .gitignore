@@ -21,7 +21,13 @@ artifacts/generated/*
 !artifacts/generated/.gitkeep
 artifacts/qa/*
 !artifacts/qa/.gitkeep
+artifacts/usage/*
+!artifacts/usage/.gitkeep
 
 # Model files are installed locally and should not be committed.
 models/*
 !models/.gitkeep
+
+# Runtime-managed external tools, including container-bootstrapped whisper.cpp.
+external/*
+!external/.gitkeep

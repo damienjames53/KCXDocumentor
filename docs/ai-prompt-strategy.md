@@ -6,16 +6,16 @@ KCXDocumentor uses Anthropic Claude Sonnet 4.6 for the guide-draft implementatio
 
 Official Anthropic docs list the Claude API model ID as `claude-sonnet-4-6`. The current model overview positions Sonnet 4.6 as the best speed/intelligence balance, with text and image input, a 1M token context window, and Claude API pricing of $3/input MTok and $15/output MTok.
 
-Configuration lives in ignored `.env`:
+Local configuration points to the Azure Function proxy. The Anthropic key is configured on the Function App as `ANTHROPIC_API_KEY`, not in the local app:
 
 ```text
-ANTHROPIC_API_KEY=
 KCXDOC_AI_PROVIDER=anthropic
 KCXDOC_ANTHROPIC_MODEL=claude-sonnet-4-6
 KCXDOC_PROMPT_VERSION=guide-draft-v1
+KCXDOC_REMOTE_API_BASE_URL=https://kcxdocumentor-ai-dev.azurewebsites.net
 ```
 
-Do not commit `.env`.
+Do not commit `.env` or API keys.
 
 ## Prompt Contract
 
@@ -42,4 +42,3 @@ Narration is not final guide prose. The model must convert first-person narratio
 The output must be valid guide draft JSON matching `schemas/guide_draft.schema.json`.
 
 The model must not output raw trace JSON, prompt text, internal reasoning, environment metadata, API keys, or source-project names.
-

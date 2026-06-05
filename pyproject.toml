@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Prototype QA lane for token-aware workstation recording documentation."
 requires-python = ">=3.11"
 dependencies = [
+    "PyJWT[crypto]>=2.10.1",
     "python-docx>=1.1.2",
 ]
 

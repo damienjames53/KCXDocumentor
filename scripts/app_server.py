@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import hmac
 import hashlib
 import json
+import math
 import mimetypes
 import os
 import re
@@ -13,19 +16,36 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
+import xml.etree.ElementTree as ET
+from http.cookies import SimpleCookie
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
+from urllib.request import Request, urlopen
+from zipfile import BadZipFile, ZipFile
+
+import jwt
+from jwt import PyJWKClient
 
 
 WORKSPACE = Path(__file__).resolve().parents[1]
 WEB_ROOT = WORKSPACE / "web"
+DOCS_ROOT = WORKSPACE / "docs"
 RAW_ROOT = WORKSPACE / "samples" / "raw"
 PROCESSED_ROOT = WORKSPACE / "samples" / "processed"
 GENERATED_ROOT = WORKSPACE / "artifacts" / "generated"
 USAGE_DB_PATH = WORKSPACE / "artifacts" / "usage" / "generation_usage.sqlite3"
+DEFAULT_AUTH_CLIENT_ID = "9d5d6572-b583-4df9-8fe6-8f96c71fad58"
+DEFAULT_AUTH_TENANT_ID = "543e31cf-f2b9-457e-88af-82a3938c2913"
+DEFAULT_AUTH_AUTHORITY = f"https://login.microsoftonline.com/{DEFAULT_AUTH_TENANT_ID}"
+DEFAULT_AUTH_SCOPES = "openid profile"
+PUBLIC_API_PATHS = {"/api/auth-config", "/api/auth-session", "/api/logout", "/api/health"}
+AUTH_SESSION_COOKIE = "KCXDocumentorAuth"
+AUTH_SESSION_SECRET = ""
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 FRAME_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,96}$")
 SEGMENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,96}$")
@@ -37,13 +57,50 @@ REDACTION_PATTERNS = [
     re.compile(r"(?i)(anthropic[_-]?api[_-]?key\s*[=:]\s*)[^\s\"']+"),
     re.compile(r"sk-ant-[A-Za-z0-9_-]+"),
 ]
+JWKS_CACHE: dict[str, Any] = {"url": "", "expires": 0.0, "keys": []}
+
+
+def load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_env_file(WORKSPACE / ".env")
+AUTH_SESSION_SECRET = os.environ.get("KCXDOC_AUTH_SESSION_SECRET") or hashlib.sha256(os.urandom(32)).hexdigest()
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the local KCXDocumentor prototype app server.")
+    parser.add_argument(
+        "--export-usage-json",
+        nargs="?",
+        const="-",
+        metavar="PATH",
+        help="Export local SQLite usage records as JSON for remote API migration. Use '-' or omit PATH for stdout.",
+    )
     parser.add_argument("--host", default="127.0.0.1", help="Host interface. Defaults to 127.0.0.1.")
     parser.add_argument("--port", type=int, default=8765, help="Port. Defaults to 8765.")
     args = parser.parse_args()
+
+    if args.export_usage_json is not None:
+        payload = export_usage_records_for_remote()
+        data = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        if args.export_usage_json == "-":
+            sys.stdout.write(data)
+        else:
+            output_path = Path(args.export_usage_json)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(data, encoding="utf-8")
+        return 0
 
     RAW_ROOT.mkdir(parents=True, exist_ok=True)
     PROCESSED_ROOT.mkdir(parents=True, exist_ok=True)
@@ -67,6 +124,10 @@ class KCXDocumentorHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         try:
             parsed = urlparse(self.path)
+            self.require_api_auth(parsed.path)
+            if parsed.path == "/api/auth-config":
+                self.send_json({"auth": get_auth_config()})
+                return
             if parsed.path == "/api/recordings":
                 self.send_json({"recordings": list_recordings()})
                 return
@@ -81,7 +142,7 @@ class KCXDocumentorHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/usage-summary":
                 params = parse_qs(parsed.query)
-                self.send_json(read_usage_summary(first_query_value(params, "range") or "day"))
+                self.send_json(read_usage_summary(first_query_value(params, "range") or "day", bearer_token=self.bearer_token()))
                 return
             if parsed.path == "/api/session":
                 params = parse_qs(parsed.query)
@@ -103,6 +164,9 @@ class KCXDocumentorHandler(BaseHTTPRequestHandler):
                 session_dir = require_session_dir(first_query_value(params, "sessionId"))
                 self.send_json({"frameReview": read_frame_review_view(session_dir)})
                 return
+            if parsed.path == "/api/user-guide":
+                self.serve_user_guide()
+                return
             self.serve_static(parsed.path)
         except HttpError as exc:
             self.send_json({"error": exc.message}, status=exc.status)
@@ -112,6 +176,13 @@ class KCXDocumentorHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             parsed = urlparse(self.path)
+            self.require_api_auth(parsed.path)
+            if parsed.path == "/api/auth-session":
+                self.create_auth_session()
+                return
+            if parsed.path == "/api/logout":
+                self.clear_auth_session()
+                return
             if parsed.path == "/api/import-recording":
                 self.send_json(import_upload(self, kind="recording"))
                 return
@@ -132,10 +203,13 @@ class KCXDocumentorHandler(BaseHTTPRequestHandler):
                 self.send_json(extract_review_frame(body))
                 return
             if parsed.path == "/api/generate-draft":
-                self.send_json(generate_draft(body))
+                self.send_json(generate_draft(body, bearer_token=self.bearer_token()))
+                return
+            if parsed.path == "/api/migrate-usage":
+                self.send_json(migrate_usage_records(bearer_token=self.bearer_token()))
                 return
             if parsed.path == "/api/build-docx":
-                self.send_json(build_docx(body))
+                self.send_json(build_docx(body, bearer_token=self.bearer_token()))
                 return
             if parsed.path == "/api/qa-docx":
                 self.send_json(qa_docx(body))
@@ -157,6 +231,59 @@ class KCXDocumentorHandler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict):
             raise HttpError(HTTPStatus.BAD_REQUEST, "Request body must be a JSON object.")
         return payload
+
+    def require_api_auth(self, path: str) -> None:
+        if not path.startswith("/api/") or path in PUBLIC_API_PATHS:
+            return
+        if not get_auth_config().get("enabled"):
+            return
+        if validate_auth_session_cookie(self.headers.get("Cookie", "")):
+            return
+        authorization = self.headers.get("Authorization", "")
+        if not authorization.startswith("Bearer "):
+            raise HttpError(HTTPStatus.UNAUTHORIZED, "Authentication is required.")
+        claims = validate_bearer_token(authorization.removeprefix("Bearer ").strip())
+        if not claims:
+            raise HttpError(HTTPStatus.UNAUTHORIZED, "Authentication token is invalid or expired.")
+
+    def bearer_token(self) -> str:
+        authorization = self.headers.get("Authorization", "")
+        if authorization.startswith("Bearer "):
+            return authorization.removeprefix("Bearer ").strip()
+        return ""
+
+    def create_auth_session(self) -> None:
+        authorization = self.headers.get("Authorization", "")
+        if not authorization.startswith("Bearer "):
+            raise HttpError(HTTPStatus.UNAUTHORIZED, "Authentication is required.")
+        claims = validate_bearer_token(authorization.removeprefix("Bearer ").strip())
+        if not claims:
+            raise HttpError(HTTPStatus.UNAUTHORIZED, "Authentication token is invalid or expired.")
+        max_age = max(0, min(int(claims.get("exp", 0) - time_now()), 8 * 60 * 60))
+        cookie = build_auth_session_cookie(claims, max_age)
+        payload = {
+            "authenticated": True,
+            "name": claims.get("name") or claims.get("preferred_username") or claims.get("upn") or "Signed in user",
+            "expiresInSeconds": max_age,
+        }
+        data = build_json_response(payload)
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Set-Cookie", cookie)
+        self.end_headers()
+        self.wfile.write(data)
+
+    def clear_auth_session(self) -> None:
+        data = build_json_response({"authenticated": False})
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Set-Cookie", f"{AUTH_SESSION_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly")
+        self.end_headers()
+        self.wfile.write(data)
 
     def serve_static(self, raw_path: str) -> None:
         if raw_path in ("", "/"):
@@ -183,6 +310,8 @@ class KCXDocumentorHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        if status == HTTPStatus.UNAUTHORIZED:
+            self.send_header("WWW-Authenticate", 'Bearer error="invalid_token"')
         self.end_headers()
         self.wfile.write(data)
 
@@ -200,6 +329,12 @@ class KCXDocumentorHandler(BaseHTTPRequestHandler):
             raise HttpError(HTTPStatus.NOT_FOUND, "Session asset not found.")
 
         self.serve_file(candidate, inline_name=candidate.name)
+
+    def serve_user_guide(self) -> None:
+        candidate = DOCS_ROOT / "user-guide.docx"
+        if not candidate.is_file():
+            raise HttpError(HTTPStatus.NOT_FOUND, "User guide DOCX not found.")
+        self.serve_file(candidate, inline_name="KCXDocumentor User Guide.docx")
 
     def serve_file(self, candidate: Path, inline_name: str = "") -> None:
         content_type = mimetypes.guess_type(str(candidate))[0] or "application/octet-stream"
@@ -277,8 +412,12 @@ def describe_raw_file(path: Path) -> dict[str, Any]:
 def get_health() -> dict[str, Any]:
     ffmpeg = shutil.which("ffmpeg")
     ffprobe = shutil.which("ffprobe")
-    whisper = shutil.which("whisper-cli")
-    whisper_model = WORKSPACE / "models" / "whisper" / "ggml-base.en.bin"
+    configured_whisper = os.environ.get("KCXDOC_WHISPER_CLI", "").strip()
+    whisper = str(Path(configured_whisper).expanduser()) if configured_whisper else shutil.which("whisper-cli")
+    whisper_model = Path(
+        os.environ.get("KCXDOC_WHISPER_MODEL", "").strip()
+        or WORKSPACE / "models" / "whisper" / "ggml-base.en.bin"
+    ).expanduser()
     return {
         "status": "ok",
         "workspace": str(WORKSPACE),
@@ -295,13 +434,122 @@ def get_health() -> dict[str, Any]:
                 "path": ffprobe,
             },
             "whisper": {
-                "available": bool(whisper),
+                "available": bool(whisper and Path(whisper).exists()) if configured_whisper else bool(whisper),
                 "path": whisper,
                 "modelAvailable": whisper_model.exists(),
-                "modelPath": relative_to_workspace(whisper_model),
+                "modelPath": relative_to_workspace(whisper_model) if is_relative_to(whisper_model.resolve(), WORKSPACE) else str(whisper_model),
             },
         },
     }
+
+
+def get_auth_config() -> dict[str, Any]:
+    tenant_id = os.environ.get("KCXDOC_AUTH_TENANT_ID", DEFAULT_AUTH_TENANT_ID).strip()
+    client_id = os.environ.get("KCXDOC_AUTH_CLIENT_ID", DEFAULT_AUTH_CLIENT_ID).strip()
+    authority = os.environ.get("KCXDOC_AUTH_AUTHORITY", f"https://login.microsoftonline.com/{tenant_id}").rstrip("/")
+    enabled = bool_env("KCXDOC_AUTH_ENABLED", True)
+    return {
+        "enabled": enabled,
+        "tenantId": tenant_id,
+        "clientId": client_id,
+        "authority": authority,
+        "redirectUri": os.environ.get("KCXDOC_AUTH_REDIRECT_URI", "").strip() or None,
+        "postLogoutRedirectUri": os.environ.get("KCXDOC_AUTH_POST_LOGOUT_REDIRECT_URI", "").strip() or None,
+        "scopes": split_scopes(os.environ.get("KCXDOC_AUTH_SCOPES", DEFAULT_AUTH_SCOPES)),
+    }
+
+
+def bool_env(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def split_scopes(raw_scopes: str) -> list[str]:
+    scopes = [scope.strip() for scope in re.split(r"[\s,]+", raw_scopes or "") if scope.strip()]
+    return scopes or split_scopes(DEFAULT_AUTH_SCOPES)
+
+
+def validate_bearer_token(token: str) -> dict[str, Any]:
+    config = get_auth_config()
+    if not token:
+        return {}
+    try:
+        signing_key = get_jwk_client(config["tenantId"]).get_signing_key_from_jwt(token)
+        return jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience=config["clientId"],
+            issuer=token_issuers(config["tenantId"]),
+            options={"require": ["exp", "iat", "iss", "aud"]},
+            leeway=60,
+        )
+    except (jwt.PyJWTError, OSError, ValueError):
+        return {}
+
+
+def build_auth_session_cookie(claims: dict[str, Any], max_age: int) -> str:
+    payload = {
+        "aud": claims.get("aud", ""),
+        "iss": claims.get("iss", ""),
+        "sub": claims.get("sub") or claims.get("oid") or "",
+        "exp": min(int(claims.get("exp", 0) or 0), int(time_now()) + max_age),
+    }
+    encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8")).decode("ascii").rstrip("=")
+    signature = hmac.new(AUTH_SESSION_SECRET.encode("utf-8"), encoded.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{AUTH_SESSION_COOKIE}={encoded}.{signature}; Path=/; Max-Age={max_age}; SameSite=Lax; HttpOnly"
+
+
+def validate_auth_session_cookie(cookie_header: str) -> bool:
+    if not cookie_header:
+        return False
+    cookie = SimpleCookie()
+    try:
+        cookie.load(cookie_header)
+    except Exception:
+        return False
+    morsel = cookie.get(AUTH_SESSION_COOKIE)
+    if not morsel or "." not in morsel.value:
+        return False
+    encoded, signature = morsel.value.rsplit(".", 1)
+    expected = hmac.new(AUTH_SESSION_SECRET.encode("utf-8"), encoded.encode("ascii"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        return False
+    try:
+        padded = encoded + ("=" * (-len(encoded) % 4))
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+    except (ValueError, json.JSONDecodeError):
+        return False
+    config = get_auth_config()
+    return (
+        payload.get("aud") == config["clientId"]
+        and payload.get("iss") in token_issuers(config["tenantId"])
+        and int(payload.get("exp", 0) or 0) > time_now()
+    )
+
+
+def time_now() -> int:
+    return int(time.time())
+
+
+def get_jwk_client(tenant_id: str) -> PyJWKClient:
+    jwks_url = f"https://login.microsoftonline.com/{tenant_id}/discovery/v2.0/keys"
+    cached_client = JWKS_CACHE.get("client")
+    if cached_client and JWKS_CACHE.get("url") == jwks_url:
+        return cached_client
+    client = PyJWKClient(jwks_url)
+    JWKS_CACHE["url"] = jwks_url
+    JWKS_CACHE["client"] = client
+    return client
+
+
+def token_issuers(tenant_id: str) -> list[str]:
+    return [
+        f"https://login.microsoftonline.com/{tenant_id}/v2.0",
+        f"https://sts.windows.net/{tenant_id}/",
+    ]
 
 
 def list_sessions() -> list[dict[str, Any]]:
@@ -342,7 +590,7 @@ def process_recording(body: dict[str, Any]) -> dict[str, Any]:
     return response
 
 
-def generate_draft(body: dict[str, Any]) -> dict[str, Any]:
+def generate_draft(body: dict[str, Any], bearer_token: str = "") -> dict[str, Any]:
     session_dir = require_session_dir(body.get("sessionId"))
     trace_path = session_dir / "procedure_trace.json"
     if not trace_path.exists():
@@ -360,7 +608,12 @@ def generate_draft(body: dict[str, Any]) -> dict[str, Any]:
         str(output),
     ]
 
-    result = run_command(command)
+    extra_env = {}
+    if remote_api_base_url():
+        if not bearer_token:
+            raise HttpError(HTTPStatus.UNAUTHORIZED, "A signed-in user bearer token is required to create guides through the AI proxy.")
+        extra_env["KCXDOC_REMOTE_API_BEARER_TOKEN"] = bearer_token
+    result = run_command(command, extra_env=extra_env)
     response = {"command": command_summary(command), "draft": relative_to_workspace(output), "result": result}
     if output.exists():
         response["draftSummary"] = read_json_summary(output)
@@ -370,7 +623,7 @@ def generate_draft(body: dict[str, Any]) -> dict[str, Any]:
     return response
 
 
-def build_docx(body: dict[str, Any]) -> dict[str, Any]:
+def build_docx(body: dict[str, Any], bearer_token: str = "") -> dict[str, Any]:
     session_dir = require_session_dir(body.get("sessionId"))
     draft_path = GENERATED_ROOT / session_dir.name / "guide_draft.anthropic.json"
     if not draft_path.exists():
@@ -388,6 +641,11 @@ def build_docx(body: dict[str, Any]) -> dict[str, Any]:
     response = {"command": command_summary(command), "docx": relative_to_workspace(output), "result": result}
     if output.exists():
         response["docxSizeBytes"] = output.stat().st_size
+        page_count = estimate_docx_page_count(output)
+        response["pageCount"] = page_count
+        generation_report = read_json_if_exists(draft_path.parent / "generation_report.json")
+        if remote_api_base_url() and generation_report:
+            response["usageUpdate"] = update_remote_usage_page_count(generation_report, page_count, bearer_token=bearer_token)
     return response
 
 
@@ -503,7 +761,12 @@ def read_generation_summary(generated_dir: Path) -> dict[str, Any]:
     return {}
 
 
-def read_usage_summary(range_name: str = "day") -> dict[str, Any]:
+def read_usage_summary(range_name: str = "day", bearer_token: str = "") -> dict[str, Any]:
+    normalized_range = range_name if range_name in {"day", "week", "month", "year"} else "day"
+    return read_remote_usage_summary(normalized_range, bearer_token=bearer_token)
+
+
+def read_local_usage_summary(range_name: str = "day") -> dict[str, Any]:
     normalized_range = range_name if range_name in {"day", "week", "month", "year"} else "day"
     reports = collect_generation_reports()
     buckets: dict[str, dict[str, Any]] = {}
@@ -526,6 +789,168 @@ def read_usage_summary(range_name: str = "day") -> dict[str, Any]:
     }
 
 
+def read_remote_usage_summary(range_name: str, bearer_token: str = "") -> dict[str, Any]:
+    base_url = remote_api_base_url()
+    if not base_url:
+        raise HttpError(HTTPStatus.BAD_REQUEST, "KCXDOC_REMOTE_API_BASE_URL is required for AI spend reporting.")
+    if not bearer_token:
+        raise HttpError(HTTPStatus.UNAUTHORIZED, "A signed-in user bearer token is required for AI spend reporting.")
+    summary = fetch_remote_usage_summary(base_url, range_name, bearer_token=bearer_token)
+    return normalize_usage_summary_response(summary, range_name)
+
+
+def remote_api_base_url() -> str:
+    return os.environ.get("KCXDOC_REMOTE_API_BASE_URL", "").strip().rstrip("/")
+
+
+def fetch_remote_usage_summary(base_url: str, range_name: str, timeout_seconds: float = 5.0, bearer_token: str = "") -> dict[str, Any]:
+    url = f"{base_url}/api/usage-summary?{urlencode({'range': range_name})}"
+    headers = {"Accept": "application/json"}
+    if bearer_token:
+        headers["Authorization"] = f"Bearer {bearer_token}"
+    request = Request(url, headers=headers)
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            raw = response.read()
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        message = remote_error_message(detail) or f"Remote usage summary failed: HTTP {exc.code}"
+        raise HttpError(HTTPStatus(exc.code), message) from exc
+    except URLError as exc:
+        raise HttpError(HTTPStatus.BAD_GATEWAY, f"Remote usage summary failed: {exc}") from exc
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Remote usage summary must be a JSON object.")
+    return payload
+
+
+def remote_error_message(detail: str) -> str:
+    payload = safe_json_loads(detail)
+    if isinstance(payload, dict):
+        return str(payload.get("error") or payload.get("message") or "").strip()
+    return detail.strip()
+
+
+def safe_json_loads(value: str) -> Any:
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+
+def migrate_usage_records(bearer_token: str = "") -> dict[str, Any]:
+    if not bearer_token:
+        raise HttpError(HTTPStatus.UNAUTHORIZED, "A signed-in user bearer token is required to migrate AI usage.")
+    base_url = remote_api_base_url()
+    if not base_url:
+        raise HttpError(HTTPStatus.BAD_REQUEST, "KCXDOC_REMOTE_API_BASE_URL is required to migrate AI usage.")
+    payload = export_usage_records_for_remote()
+    records = payload.get("records") if isinstance(payload.get("records"), list) else []
+    if not records:
+        return {
+            "exported": 0,
+            "imported": 0,
+            "message": "No local SQLite usage records were available to migrate.",
+        }
+    result = post_remote_usage_records(base_url, records, timeout_seconds=30.0, bearer_token=bearer_token)
+    return {
+        "exported": len(records),
+        "imported": int(result.get("imported") or 0),
+        "remote": result,
+    }
+
+
+def update_remote_usage_page_count(report: dict[str, Any], page_count: int, bearer_token: str = "") -> dict[str, Any]:
+    if page_count <= 0:
+        return {"updated": False, "reason": "Page count was not available."}
+    base_url = remote_api_base_url()
+    if not base_url:
+        raise RuntimeError("KCXDOC_REMOTE_API_BASE_URL is required to update AI usage page counts.")
+    if not bearer_token:
+        raise RuntimeError("A signed-in user bearer token is required to update AI usage page counts.")
+    updated_report = {
+        **report,
+        "pageCount": page_count,
+    }
+    usage = updated_report.get("usage") if isinstance(updated_report.get("usage"), dict) else {}
+    updated_report["usage"] = {
+        **usage,
+        "pageCount": page_count,
+    }
+    return post_remote_usage_records(base_url, [updated_report], bearer_token=bearer_token)
+
+
+def post_remote_usage_records(base_url: str, records: list[dict[str, Any]], timeout_seconds: float = 15.0, bearer_token: str = "") -> dict[str, Any]:
+    url = f"{base_url}/api/usage-records"
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    if bearer_token:
+        headers["Authorization"] = f"Bearer {bearer_token}"
+    request = Request(
+        url,
+        data=json.dumps({"records": records}).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            raw = response.read()
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise OSError(f"Remote usage update failed: HTTP {exc.code}: {detail}") from exc
+    except URLError as exc:
+        raise OSError(f"Remote usage update failed: {exc}") from exc
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Remote usage update must return a JSON object.")
+    return payload
+
+
+def normalize_usage_summary_response(summary: dict[str, Any], range_name: str) -> dict[str, Any]:
+    normalized_range = str(summary.get("range") or range_name)
+    if normalized_range not in {"day", "week", "month", "year"}:
+        normalized_range = range_name if range_name in {"day", "week", "month", "year"} else "day"
+    buckets = summary.get("buckets")
+    if not isinstance(buckets, list):
+        raise ValueError("Remote usage summary is missing buckets.")
+    totals = summary.get("totals")
+    if not isinstance(totals, dict):
+        raise ValueError("Remote usage summary is missing totals.")
+    normalized = {
+        **summary,
+        "range": normalized_range,
+        "generatedAt": str(summary.get("generatedAt") or utc_now()),
+        "totals": normalize_usage_totals(totals),
+        "buckets": buckets,
+    }
+    days = summary.get("days")
+    normalized["days"] = days if isinstance(days, list) else (buckets if normalized_range == "day" else [])
+    return normalized
+
+
+def normalize_usage_totals(totals: dict[str, Any]) -> dict[str, Any]:
+    normalized = empty_usage_totals()
+    for key in ("documents", "attempts", "failedAttempts", "inputTokens", "outputTokens", "totalTokens", "pageCount"):
+        normalized[key] = int(totals.get(key) or 0)
+    normalized["estimatedCostUSD"] = round(float(totals.get("estimatedCostUSD") or 0), 6)
+    if totals.get("costPerPageUSD"):
+        normalized["costPerPageUSD"] = round(float(totals.get("costPerPageUSD") or 0), 6)
+    else:
+        normalized["costPerPageUSD"] = cost_per_page(normalized["estimatedCostUSD"], normalized["pageCount"])
+    return normalized
+
+
+def export_usage_records_for_remote(db_path: Path | None = None) -> dict[str, Any]:
+    return {
+        "schemaVersion": 1,
+        "exportedAt": utc_now(),
+        "source": "local-sqlite",
+        "records": read_usage_db_records(db_path),
+    }
+
+
 def collect_generation_reports() -> list[dict[str, Any]]:
     reports_by_id: dict[str, dict[str, Any]] = {}
     for report in read_usage_db_records():
@@ -543,7 +968,17 @@ def collect_generation_reports() -> list[dict[str, Any]]:
             data = read_json_if_exists(session_dir / "guide_draft.anthropic.json")
         report = generation_report_record_from_json(data, session_dir.name)
         if report:
-            reports_by_id.setdefault(report["generationRunId"], report)
+            if not report.get("pageCount"):
+                docx_path = session_dir / "user_guide.anthropic.docx"
+                if docx_path.is_file() and str(report.get("status") or "succeeded") != "failed":
+                    page_count = estimate_docx_page_count(docx_path)
+                    report["pageCount"] = page_count
+                    update_usage_page_count(session_dir.name, page_count, generation_run_id=report.get("generationRunId"))
+            existing = reports_by_id.get(report["generationRunId"])
+            if existing and not existing.get("pageCount") and report.get("pageCount"):
+                existing["pageCount"] = report["pageCount"]
+            else:
+                reports_by_id.setdefault(report["generationRunId"], report)
     return list(reports_by_id.values())
 
 
@@ -559,7 +994,7 @@ def read_usage_db_records(db_path: Path | None = None) -> list[dict[str, Any]]:
                 """
                 SELECT generation_run_id, generated_at, session_id, title, provider,
                        model, prompt_version, input_tokens, output_tokens, total_tokens,
-                       estimated_cost_usd, status, error_message
+                       estimated_cost_usd, page_count, status, error_message
                 FROM generation_usage
                 ORDER BY generated_at, generation_run_id
                 """
@@ -579,6 +1014,7 @@ def read_usage_db_records(db_path: Path | None = None) -> list[dict[str, Any]]:
             "outputTokens": row["output_tokens"],
             "totalTokens": row["total_tokens"],
             "estimatedCostUSD": row["estimated_cost_usd"],
+            "pageCount": row["page_count"],
             "status": row["status"],
             "errorMessage": row["error_message"],
         }
@@ -602,6 +1038,7 @@ def ensure_usage_schema(connection: sqlite3.Connection) -> None:
             output_tokens INTEGER NOT NULL DEFAULT 0,
             total_tokens INTEGER NOT NULL DEFAULT 0,
             estimated_cost_usd REAL NOT NULL DEFAULT 0,
+            page_count INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'succeeded',
             error_message TEXT NOT NULL DEFAULT '',
             report_json TEXT NOT NULL
@@ -616,6 +1053,8 @@ def ensure_usage_schema(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE generation_usage ADD COLUMN status TEXT NOT NULL DEFAULT 'succeeded'")
     if "error_message" not in existing_columns:
         connection.execute("ALTER TABLE generation_usage ADD COLUMN error_message TEXT NOT NULL DEFAULT ''")
+    if "page_count" not in existing_columns:
+        connection.execute("ALTER TABLE generation_usage ADD COLUMN page_count INTEGER NOT NULL DEFAULT 0")
 
 
 def generation_report_record_from_json(data: dict[str, Any], fallback_session_id: str = "") -> dict[str, Any]:
@@ -628,6 +1067,7 @@ def generation_report_record_from_json(data: dict[str, Any], fallback_session_id
         "title": data.get("title") or nested_title(data),
         "status": data.get("status") or summary.get("status") or "succeeded",
         "errorMessage": data.get("errorMessage") or summary.get("errorMessage") or "",
+        "generatedBy": normalize_generated_by(data.get("generatedBy") or data.get("user")),
     }
     record["generationRunId"] = data.get("generationRunId") or generation_run_id_from_record(record)
     return record
@@ -649,6 +1089,81 @@ def generation_run_id_from_record(record: dict[str, Any]) -> str:
         )
     )
     return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:16]
+
+
+def update_usage_page_count(session_id: str, page_count: int, generation_run_id: str | None = None) -> None:
+    if page_count <= 0:
+        return
+    try:
+        USAGE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(USAGE_DB_PATH) as connection:
+            ensure_usage_schema(connection)
+            if generation_run_id:
+                cursor = connection.execute(
+                    "UPDATE generation_usage SET page_count = ? WHERE generation_run_id = ?",
+                    (page_count, generation_run_id),
+                )
+                if cursor.rowcount:
+                    return
+            connection.execute(
+                """
+                UPDATE generation_usage
+                SET page_count = ?
+                WHERE generation_run_id = (
+                    SELECT generation_run_id
+                    FROM generation_usage
+                    WHERE session_id = ? AND status != 'failed'
+                    ORDER BY generated_at DESC, recorded_at DESC
+                    LIMIT 1
+                )
+                """,
+                (page_count, session_id),
+            )
+    except sqlite3.Error:
+        return
+
+
+def estimate_docx_page_count(docx_path: Path) -> int:
+    try:
+        with ZipFile(docx_path) as package:
+            app_pages = docx_app_page_count(package)
+            document_xml = package.read("word/document.xml")
+    except (BadZipFile, KeyError, OSError):
+        return 0
+
+    try:
+        root = ET.fromstring(document_xml)
+    except ET.ParseError:
+        return max(app_pages, 0)
+
+    ns = {
+        "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+        "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    }
+    text = " ".join(node.text or "" for node in root.findall(".//w:t", ns))
+    words = len(re.findall(r"\b\w+\b", text))
+    images = len(root.findall(".//a:blip", ns))
+    page_breaks = len(root.findall(".//w:br[@w:type='page']", ns))
+    section_count = len(root.findall(".//w:sectPr", ns))
+    estimated = max(
+        1,
+        math.ceil((words / 430) + (images * 0.45) + page_breaks + max(0, section_count - 1) * 0.35),
+    )
+    if app_pages > 1:
+        return max(app_pages, estimated)
+    return estimated
+
+
+def docx_app_page_count(package: ZipFile) -> int:
+    try:
+        root = ET.fromstring(package.read("docProps/app.xml"))
+    except (KeyError, ET.ParseError):
+        return 0
+    pages = root.find("{http://schemas.openxmlformats.org/officeDocument/2006/extended-properties}Pages")
+    try:
+        return int((pages.text if pages is not None else "0") or 0)
+    except ValueError:
+        return 0
 
 
 def nested_title(data: dict[str, Any]) -> str:
@@ -685,7 +1200,9 @@ def empty_usage_totals() -> dict[str, Any]:
         "inputTokens": 0,
         "outputTokens": 0,
         "totalTokens": 0,
+        "pageCount": 0,
         "estimatedCostUSD": 0.0,
+        "costPerPageUSD": 0.0,
     }
 
 
@@ -699,8 +1216,10 @@ def add_usage_to_bucket(bucket: dict[str, Any], report: dict[str, Any]) -> None:
         "inputTokens": report.get("inputTokens") or 0,
         "outputTokens": report.get("outputTokens") or 0,
         "totalTokens": report.get("totalTokens") or 0,
+        "pageCount": 0 if failed else int(report.get("pageCount") or 0),
         "estimatedCostUSD": report.get("estimatedCostUSD") or 0.0,
     }
+    totals["costPerPageUSD"] = cost_per_page(totals["estimatedCostUSD"], totals["pageCount"])
     add_totals(bucket["totals"], totals)
     bucket["documents"].append(
         {
@@ -710,14 +1229,28 @@ def add_usage_to_bucket(bucket: dict[str, Any], report: dict[str, Any]) -> None:
             "generatedAt": report.get("generatedAt", ""),
             "status": status,
             "errorMessage": report.get("errorMessage", ""),
+            "generatedBy": normalize_generated_by(report.get("generatedBy") or report.get("user")),
             "usage": {
                 "inputTokens": totals["inputTokens"],
                 "outputTokens": totals["outputTokens"],
                 "totalTokens": totals["totalTokens"],
                 "estimatedCostUSD": totals["estimatedCostUSD"],
+                "pageCount": totals["pageCount"],
+                "costPerPageUSD": totals["costPerPageUSD"],
             },
         }
     )
+
+
+def normalize_generated_by(value: Any) -> dict[str, str]:
+    source = value if isinstance(value, dict) else {}
+    username = str(source.get("username") or source.get("upn") or source.get("email") or "").strip()
+    name = str(source.get("name") or source.get("displayName") or username).strip()
+    return {
+        "oid": str(source.get("oid") or source.get("id") or source.get("sub") or "").strip(),
+        "name": name,
+        "username": username,
+    }
 
 
 def add_totals(target: dict[str, Any], source: dict[str, Any]) -> None:
@@ -727,7 +1260,16 @@ def add_totals(target: dict[str, Any], source: dict[str, Any]) -> None:
     target["inputTokens"] = int(target.get("inputTokens") or 0) + int(source.get("inputTokens") or 0)
     target["outputTokens"] = int(target.get("outputTokens") or 0) + int(source.get("outputTokens") or 0)
     target["totalTokens"] = int(target.get("totalTokens") or 0) + int(source.get("totalTokens") or 0)
+    target["pageCount"] = int(target.get("pageCount") or 0) + int(source.get("pageCount") or 0)
     target["estimatedCostUSD"] = round(float(target.get("estimatedCostUSD") or 0) + float(source.get("estimatedCostUSD") or 0), 6)
+    target["costPerPageUSD"] = cost_per_page(target["estimatedCostUSD"], target["pageCount"])
+
+
+def cost_per_page(cost: Any, page_count: Any) -> float:
+    pages = int(page_count or 0)
+    if pages <= 0:
+        return 0.0
+    return round(float(cost or 0) / pages, 6)
 
 
 def generation_summary_from_json(data: dict[str, Any]) -> dict[str, Any]:
@@ -749,10 +1291,14 @@ def generation_summary_from_json(data: dict[str, Any]) -> dict[str, Any]:
     if total_tokens is None and (input_tokens is not None or output_tokens is not None):
         total_tokens = int(input_tokens or 0) + int(output_tokens or 0)
     estimated_cost = number_or_none(first_present(usage, "estimatedCostUSD", "estimated_cost_usd", "costUSD", "cost_usd"))
+    page_count = number_or_none(first_present(data, "pageCount", "page_count", "pages"))
+    if page_count is None:
+        page_count = number_or_none(first_present(usage, "pageCount", "page_count", "pages"))
     generated_at = str(data.get("generatedAt") or data.get("generated_at") or data.get("createdUtc") or data.get("createdAt") or "")
     if not any((model_name, generated_at, total_tokens is not None, estimated_cost is not None)):
         return {}
     return {
+        "title": str(data.get("title") or nested_title(data) or ""),
         "model": model_name,
         "provider": provider,
         "promptVersion": prompt_version,
@@ -761,6 +1307,7 @@ def generation_summary_from_json(data: dict[str, Any]) -> dict[str, Any]:
         "outputTokens": output_tokens,
         "totalTokens": total_tokens,
         "estimatedCostUSD": estimated_cost,
+        "pageCount": int(page_count or 0),
         "status": str(data.get("status") or "succeeded"),
         "errorMessage": str(data.get("errorMessage") or ""),
     }
@@ -1061,9 +1608,11 @@ def latest_file_mtime(root: Path) -> float | None:
     return max(timestamps) if timestamps else None
 
 
-def run_command(command: list[str]) -> dict[str, Any]:
+def run_command(command: list[str], extra_env: dict[str, str] | None = None) -> dict[str, Any]:
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
+    if extra_env:
+        env.update(extra_env)
     completed = subprocess.run(
         command,
         cwd=WORKSPACE,

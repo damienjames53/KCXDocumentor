@@ -128,6 +128,25 @@ def stringify_list_item(item: Any) -> str:
     return str(item).strip()
 
 
+def sanitize_reviewer_text(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    replacements = (
+        (re.compile(r"\bsystem prompt text\b", re.IGNORECASE), "application message text"),
+        (re.compile(r"\bsystem prompt\b", re.IGNORECASE), "application message"),
+        (re.compile(r"\bprompt text\b", re.IGNORECASE), "application message text"),
+    )
+    for pattern, replacement in replacements:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def strip_visible_step_label(value: str) -> str:
+    text = str(value or "").strip()
+    return re.sub(r"^(?:Action|Instruction|Narration|Summary)\s*:\s*", "", text, flags=re.IGNORECASE).strip()
+
+
 def pick_value(source: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         value = source.get(key)
@@ -157,6 +176,7 @@ def is_internal_pipeline_text(value: str) -> bool:
     if not text:
         return True
     blocked_phrases = (
+        "prototype",
         "generated from a local procedure trace",
         "local procedure trace",
         "source recording context before publishing",
@@ -164,8 +184,64 @@ def is_internal_pipeline_text(value: str) -> bool:
         "application reviewer",
         "extracted procedure steps",
         "original recording",
+        "candidate screenshot",
+        "candidate image",
+        "screenshot must be selected",
+        "screenshot must be recaptured",
+        "needs human review",
     )
     return any(phrase in text for phrase in blocked_phrases)
+
+
+def is_review_process_text(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    review_phrases = (
+        "candidate screenshot",
+        "candidate image",
+        "candidate frame",
+        "no candidate screenshot",
+        "no screenshot was available",
+        "screenshot must be selected",
+        "screenshot must be recaptured",
+        "needs human review",
+        "flagged for human review",
+        "reviewer comment",
+        "publishing review",
+        "publication threshold",
+        "prototype",
+    )
+    return any(phrase in text for phrase in review_phrases)
+
+
+def clean_visible_text(value: str, reviewer_comments: list[str] | None = None) -> str:
+    text = strip_visible_step_label(str(value or "").strip())
+    if not text:
+        return ""
+    if is_review_process_text(text):
+        if reviewer_comments is not None:
+            extend_comment_list(reviewer_comments, [text])
+        if re.search(r"^(?:no\s+)?candidate screenshot|^no screenshot was available|screenshot must be|needs human review|flagged for human review", text, re.IGNORECASE):
+            return ""
+    replacements = (
+        (re.compile(r"\bcandidate screenshot\b", re.IGNORECASE), "screenshot"),
+        (re.compile(r"\bcandidate image\b", re.IGNORECASE), "screenshot"),
+        (re.compile(r"\bcandidate frame\b", re.IGNORECASE), "screenshot"),
+        (re.compile(r"\bprototype\b", re.IGNORECASE), "review draft"),
+    )
+    for pattern, replacement in replacements:
+        text = pattern.sub(replacement, text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def clean_document_status(value: str) -> str:
+    text = str(value or "").strip()
+    if not text or re.search(r"\bprototype\b", text, flags=re.IGNORECASE):
+        return "Final Revision for Review"
+    if text.lower() in {"draft", "draft v0.1", "requires-human-review", "requires human review"}:
+        return "Final Revision for Review"
+    return clean_visible_text(text) or "Final Revision for Review"
 
 
 def format_duration(value: Any) -> str:
@@ -364,8 +440,9 @@ def customer_safe_summary(
         text_value(data, "description", "summary", "purpose"),
     ]
     for candidate in candidates:
-        if candidate and not is_internal_pipeline_text(candidate):
-            return candidate
+        cleaned = clean_visible_text(candidate)
+        if cleaned and not is_internal_pipeline_text(cleaned):
+            return cleaned
 
     app_name = first_text_value(
         (document, ("targetApplication", "application", "appName", "app_name")),
@@ -385,7 +462,7 @@ def customer_safe_summary(
 def clean_prerequisites(items: list[str], app_name: str) -> list[str]:
     cleaned = []
     for item in items:
-        text = re.sub(r"\s+", " ", item).strip()
+        text = clean_visible_text(re.sub(r"\s+", " ", item).strip())
         if not text or is_internal_pipeline_text(text):
             continue
         cleaned.append(text)
@@ -396,7 +473,34 @@ def clean_prerequisites(items: list[str], app_name: str) -> list[str]:
 
 
 def clean_customer_items(items: list[str]) -> list[str]:
-    return [item for item in items if item and not is_internal_pipeline_text(item)]
+    cleaned = []
+    for item in items:
+        text = clean_visible_text(item)
+        if text and not is_internal_pipeline_text(text):
+            cleaned.append(text)
+    return cleaned
+
+
+def default_audience(data: dict[str, Any], document: dict[str, Any], title: str, summary: str, app_name: str) -> list[str]:
+    raw_audience = clean_customer_items(as_list(data.get("audience") or document.get("audience")))
+    generic = {"application users", "users", "end users"}
+    if raw_audience and not all(item.strip().lower() in generic for item in raw_audience):
+        return raw_audience
+
+    context = " ".join([title, summary, app_name]).lower()
+    audience: list[str] = []
+    if re.search(r"\btraining|trainer|trainers|learning|lesson|bootcamp\b", context):
+        audience.extend(["Trainers and team members learning the workflow"])
+    if re.search(r"\badmin|configuration|template|settings|profile\b", context):
+        audience.append("Administrators or supervisors responsible for workflow configuration")
+    if re.search(r"\bsupport|triage|troubleshoot|implementation\b", context):
+        audience.append("Support and implementation team members")
+    if re.search(r"\bpharmacy|refill|claim|dispense|transfer|rx\b", context):
+        audience.append("Pharmacy workflow team members who complete or support the documented process")
+    if not audience:
+        workflow_label = app_name if app_name and app_name != "Not specified" else "the documented application"
+        audience.append(f"Team members who complete, support, or review the documented workflow in {workflow_label}")
+    return list(dict.fromkeys(audience))
 
 
 def ambiguous_term_comments(text: str) -> list[str]:
@@ -435,8 +539,9 @@ def derive_title_from_action(action: str, index: int) -> str:
 
 def extend_comment_list(comments: list[str], value: Any) -> None:
     for item in as_list(value):
-        if item not in comments:
-            comments.append(item)
+        sanitized = sanitize_reviewer_text(item)
+        if sanitized and sanitized not in comments:
+            comments.append(sanitized)
 
 
 def resolve_asset_path(raw_path: Any, input_path: Path, asset_roots: list[Path] | None = None) -> Path | None:
@@ -501,13 +606,18 @@ def is_likely_non_application_screenshot(path: Path | None) -> bool:
 def normalize_step(step: dict[str, Any], index: int, input_path: Path, asset_roots: list[Path] | None = None) -> GuideStep:
     screenshot, caption = first_existing_image(step, input_path, asset_roots)
     transcript = text_value(step, "speaker_text", "speakerText", "transcript", "narration", "description")
-    action = text_value(step, "action", "instruction", "intent", "stepTextPlaceholder", "body", default=transcript)
-    title = clean_step_title(text_value(step, "title", "name", "shellId", default=f"Step {index}"), index, action)
-    expected_result = text_value(step, "expected_result", "expectedResult", "result", "outcome")
     notes = as_list(step.get("notes") or step.get("warnings") or step.get("reviewNotes"))
+    reviewer_comments = list(notes)
+    action = clean_visible_text(
+        text_value(step, "action", "instruction", "intent", "stepTextPlaceholder", "body", default=transcript),
+        reviewer_comments,
+    )
+    title = clean_visible_text(clean_step_title(text_value(step, "title", "name", "shellId", default=f"Step {index}"), index, action), reviewer_comments)
+    title = title or derive_title_from_action(action, index)
+    expected_result = clean_visible_text(text_value(step, "expected_result", "expectedResult", "result", "outcome"), reviewer_comments)
+    caption = clean_visible_text(caption, reviewer_comments)
     ui_text = as_list(pick_value(step, "visible_ui_text", "visibleUiText", "ui_text", "uiText", "ocr_text", "ocrText", "confirmedUiLabels"))
     action_hints = as_list(pick_value(step, "action_hints", "actionHints", "events", "actionHint", "actionHints"))
-    reviewer_comments = list(notes)
     if step.get("needsHumanReview") is True:
         reviewer_comments.append("This step was flagged for human review by the draft generator.")
     extend_comment_list(reviewer_comments, step.get("reviewGuidance"))
@@ -597,8 +707,8 @@ def normalize_input(data: dict[str, Any], input_path: Path) -> GuideDraft:
             ),
         ),
     )
-    version = text_value(document, "version", default=text_value(data, "version", default="Draft v0.1"))
-    status = text_value(document, "status", default=text_value(data, "status", default="Prototype"))
+    version = text_value(document, "version", default=text_value(data, "version", default="Review v1.0"))
+    status = clean_document_status(text_value(document, "status", default=text_value(data, "status", default="Final Revision for Review")))
     owner = text_value(document, "owner", default=text_value(data, "owner", default="KCXDocumentor"))
     effective_date = text_value(
         document,
@@ -661,11 +771,11 @@ def normalize_input(data: dict[str, Any], input_path: Path) -> GuideDraft:
     return GuideDraft(
         title=title,
         version=version,
-        status=text_value(meta, "draftStatus", default=status),
+        status=clean_document_status(text_value(meta, "draftStatus", default=status)),
         owner=owner,
         effective_date=effective_date,
         summary=summary,
-        audience=as_list(data.get("audience") or document.get("audience") or ["Application users"]),
+        audience=default_audience(data, document, title, summary, application_name),
         prerequisites=prerequisites,
         workflow_overview=clean_customer_items(
             as_list(
@@ -772,7 +882,8 @@ def add_required_bullet_section(doc: Document, title: str, items: list[str], fal
 
 
 def add_reviewer_comment(doc: Document, paragraph: Any, comments: list[str]) -> bool:
-    clean_comments = [comment.strip() for comment in comments if comment and comment.strip()]
+    clean_comments = [sanitize_reviewer_text(comment) for comment in comments if comment and comment.strip()]
+    clean_comments = [comment for comment in clean_comments if comment]
     if not clean_comments or not paragraph.runs or not hasattr(doc, "add_comment"):
         return False
     try:
@@ -791,7 +902,7 @@ def add_fallback_reviewer_section(doc: Document, comments: list[str]) -> None:
     if not comments:
         return
     doc.add_heading("Reviewer Comments", level=1)
-    add_rich_bullets(doc, comments)
+    add_rich_bullets(doc, [comment for comment in (sanitize_reviewer_text(item) for item in comments) if comment])
 
 
 def render_step(doc: Document, step: GuideStep, index: int) -> list[str]:
@@ -806,8 +917,10 @@ def render_step(doc: Document, step: GuideStep, index: int) -> list[str]:
     else:
         fallback_comments = []
 
-    add_labeled_paragraph(doc, "Action", step.action)
-    add_labeled_paragraph(doc, "Expected result", step.expected_result)
+    if step.action:
+        add_rich_paragraph(doc, step.action)
+    if step.expected_result and step.expected_result.strip().lower() != step.action.strip().lower():
+        add_labeled_paragraph(doc, "Expected result", step.expected_result)
 
     if step.screenshot:
         picture_p = doc.add_paragraph()

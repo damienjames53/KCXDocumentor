@@ -31,7 +31,7 @@ npm run eval:offline
 - A placeholder or real recording produces a session folder.
 - A `procedure_trace.json` exists and follows `schemas/procedure_trace.schema.json`.
 - Confidence scores exist for each trace segment.
-- Anthropic Sonnet 4.6 can generate `guide_draft.json` when `ANTHROPIC_API_KEY` is configured.
+- Anthropic Sonnet 4.6 can generate `guide_draft.json` through the authenticated Azure Function proxy when `KCXDOC_REMOTE_API_BASE_URL` is configured locally and `ANTHROPIC_API_KEY` is configured on the Function App.
 - A DOCX guide is generated with local keycentrix assets.
 - The DOCX can be scanned by `scripts/qa_document_artifacts.py`.
 - The existing offline eval checks still pass.

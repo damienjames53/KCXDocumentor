@@ -5,10 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>KCXDocumentor Prototype Console</title>
     <link rel="stylesheet" href="./styles.css">
+    <script src="./vendor/msal-browser.min.js"></script>
   </head>
-  <body>
-    <header class="app-header">
-      <div>
+  <body class="app-shell">
+    <header class="app-header top-nav">
+      <div class="app-brand">
+        <img class="app-brand-logo" src="./keycentrix-logo.png" alt="KeyCentrix logo">
         <h1>KCXDocumentor</h1>
         <p>Recording review and guide build console</p>
       </div>
@@ -22,14 +24,30 @@
           <strong id="globalUsageMetric">--</strong>
         </button>
         <button id="refreshAll" class="icon-button" type="button" title="Refresh recordings and sessions">Refresh</button>
+        <button id="helpButton" class="icon-button" type="button" title="Open help and user guide">Help</button>
+        <div id="authUserPanel" class="auth-user-panel" hidden>
+          <span id="authUserName">Signed in</span>
+          <button id="logoutButton" class="icon-button" type="button">Logout</button>
+        </div>
       </div>
     </header>
+
+    <section id="authGate" class="auth-gate" aria-labelledby="authGateTitle" hidden>
+      <div class="auth-card">
+        <p class="eyebrow">Secure Access</p>
+        <h2 id="authGateTitle">Sign in to KCXDocumentor</h2>
+        <p id="authStatusText">Use your Microsoft account to access recording processing, guide generation, and AI spend reporting.</p>
+        <button id="loginButton" type="button">Sign in with Microsoft</button>
+      </div>
+    </section>
 
     <main id="workspacePage" class="workspace app-page active">
       <section class="panel pipeline-panel" aria-labelledby="pipelineTitle">
         <div class="panel-heading">
-          <h2 id="pipelineTitle">Prepare Recording</h2>
-          <span id="selectedSessionPill" class="status-pill neutral">No session selected</span>
+          <div class="pipeline-heading-copy">
+            <h2 id="pipelineTitle">Prepare Recording</h2>
+            <span id="selectedSessionPill" class="status-pill neutral">No session selected</span>
+          </div>
         </div>
 
         <ol class="workflow-steps" aria-label="Guide creation workflow">
@@ -68,11 +86,6 @@
               <option value="">No transcript selected</option>
             </select>
             <small class="field-help">Use the Teams transcript when available. If blank, the app falls back to local Whisper during processing.</small>
-          </label>
-
-          <label>
-            <span>Transcript path</span>
-            <input id="transcriptPathInput" name="transcriptPath" autocomplete="off" placeholder="optional transcript from samples/raw or import result">
           </label>
 
           <div class="field-grid">
@@ -285,6 +298,14 @@
             <button class="secondary" type="button" data-usage-range="week">Week</button>
             <button class="secondary active" type="button" data-usage-range="month">Month</button>
             <button class="secondary" type="button" data-usage-range="year">Year</button>
+            <label class="usage-sort-control">
+              <span>Sort</span>
+              <select id="usageSort">
+                <option value="date-desc">Newest</option>
+                <option value="user-asc">User A-Z</option>
+                <option value="user-desc">User Z-A</option>
+              </select>
+            </label>
           </div>
         </div>
 
@@ -302,14 +323,46 @@
             <strong id="usageInOutMetric">--</strong>
           </article>
           <article>
+            <span class="metric-label">Pages</span>
+            <strong id="usagePageMetric">--</strong>
+          </article>
+          <article>
             <span class="metric-label">Estimated Cost</span>
             <strong id="usageCostMetric">--</strong>
+          </article>
+          <article>
+            <span class="metric-label">Cost / Page</span>
+            <strong id="usageCostPerPageMetric">--</strong>
           </article>
         </div>
 
         <div id="usageBreakdown" class="usage-breakdown empty-state">Select a range to load usage totals.</div>
       </section>
     </main>
+
+    <div id="helpDrawerShell" class="help-shell" role="dialog" aria-modal="true" aria-label="Help menu" hidden>
+      <button id="helpScrim" class="help-scrim" type="button" aria-label="Close help overlay"></button>
+      <aside class="help-drawer" aria-labelledby="helpDrawerTitle">
+        <div class="help-drawer__header">
+          <div>
+            <p class="eyebrow">Help</p>
+            <h2 id="helpDrawerTitle">How can we help?</h2>
+          </div>
+          <button id="closeHelpDrawer" class="secondary modal-close" type="button" aria-label="Close help">Close</button>
+        </div>
+
+        <div class="help-drawer__body">
+          <label>
+            <span>Search help</span>
+            <input id="helpSearch" type="search" autocomplete="off" placeholder="Import, frames, QA, AI spend...">
+          </label>
+
+          <div id="helpChips" class="help-chip-list" aria-label="Suggested help topics"></div>
+          <div id="helpResults" class="help-results" aria-label="Help results"></div>
+          <section id="helpResponse" class="help-response" aria-live="polite"></section>
+        </div>
+      </aside>
+    </div>
 
     <template id="activityTemplate">
       <li>

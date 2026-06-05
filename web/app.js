@@ -19,6 +19,7 @@ const state = {
   },
   usage: {
     range: "month",
+    sort: "date-desc",
     summary: null,
     currentMonthSummary: null,
     currentMonthLoading: false,
@@ -27,6 +28,14 @@ const state = {
   },
   activePage: "workspace",
   activeTab: "trace",
+  auth: {
+    config: null,
+    client: null,
+    account: null,
+    initialized: false,
+    loading: true,
+    error: "",
+  },
   busy: false,
   operationMessage: "",
   operationMessages: [],
@@ -44,9 +53,34 @@ const AI_CREATE_MESSAGES = [
   "Running local QA checks...",
 ];
 
+const RECORDING_PROCESS_MESSAGES = [
+  "Preparing the local recording pipeline...",
+  "Reading recording details...",
+  "Extracting audio and transcript evidence...",
+  "Running local transcription when no transcript is selected...",
+  "Sampling candidate screenshots...",
+  "Checking frame quality and visual changes...",
+  "Building the review session...",
+  "Almost ready for frame review...",
+];
+
 const els = {
   workspacePage: document.querySelector("#workspacePage"),
   usagePage: document.querySelector("#usagePage"),
+  authGate: document.querySelector("#authGate"),
+  authStatusText: document.querySelector("#authStatusText"),
+  loginButton: document.querySelector("#loginButton"),
+  authUserPanel: document.querySelector("#authUserPanel"),
+  authUserName: document.querySelector("#authUserName"),
+  logoutButton: document.querySelector("#logoutButton"),
+  helpButton: document.querySelector("#helpButton"),
+  helpDrawerShell: document.querySelector("#helpDrawerShell"),
+  helpScrim: document.querySelector("#helpScrim"),
+  closeHelpDrawer: document.querySelector("#closeHelpDrawer"),
+  helpSearch: document.querySelector("#helpSearch"),
+  helpChips: document.querySelector("#helpChips"),
+  helpResults: document.querySelector("#helpResults"),
+  helpResponse: document.querySelector("#helpResponse"),
   globalUsageButton: document.querySelector("#globalUsageButton"),
   globalUsageMetric: document.querySelector("#globalUsageMetric"),
   refreshAll: document.querySelector("#refreshAll"),
@@ -57,7 +91,6 @@ const els = {
   importTranscriptButton: document.querySelector("#importTranscriptButton"),
   recordingSelect: document.querySelector("#recordingSelect"),
   transcriptSelect: document.querySelector("#transcriptSelect"),
-  transcriptPathInput: document.querySelector("#transcriptPathInput"),
   targetApplication: document.querySelector("#targetApplication"),
   sourceProfile: document.querySelector("#sourceProfile"),
   sessionIdInput: document.querySelector("#sessionIdInput"),
@@ -108,7 +141,10 @@ const els = {
   usageDocumentMetric: document.querySelector("#usageDocumentMetric"),
   usageTokenMetric: document.querySelector("#usageTokenMetric"),
   usageInOutMetric: document.querySelector("#usageInOutMetric"),
+  usagePageMetric: document.querySelector("#usagePageMetric"),
   usageCostMetric: document.querySelector("#usageCostMetric"),
+  usageCostPerPageMetric: document.querySelector("#usageCostPerPageMetric"),
+  usageSort: document.querySelector("#usageSort"),
   usageBreakdown: document.querySelector("#usageBreakdown"),
   jsonPreview: document.querySelector("#jsonPreview"),
   readinessPill: document.querySelector("#readinessPill"),
@@ -117,13 +153,116 @@ const els = {
   activityTemplate: document.querySelector("#activityTemplate"),
 };
 
-document.addEventListener("DOMContentLoaded", () => {
+const HELP_TOPICS = [
+  {
+    id: "quick-start",
+    title: "Create a guide from a recording",
+    chips: ["Quick start", "Create guide"],
+    keywords: ["recording", "process", "guide", "docx", "workflow"],
+    body: [
+      "Use this path when you already have a screen recording ready for documentation.",
+      "Select the recording, choose a transcript if one is available, set the target application, then choose Process Recording.",
+      "Review frames before creating the guide. Rejected frames are excluded from the AI context.",
+      "Choose Create Guide to generate the AI draft, build the DOCX, and run local QA in one workflow.",
+    ],
+    action: { label: "Open Workspace", type: "page", target: "workspace" },
+  },
+  {
+    id: "transcripts",
+    title: "Use transcripts and local Whisper",
+    chips: ["Transcripts", "Whisper"],
+    keywords: ["transcript", "teams", "vtt", "whisper", "stt", "audio"],
+    body: [
+      "Use a Teams transcript when one is available. It usually improves step wording and reduces ambiguity.",
+      "Leave Transcript blank when no transcript exists. KCXDocumentor will use local Whisper transcription during processing when the local tools and model are available.",
+      "Transcript import copies the file into the local sample area, then makes it selectable in the Transcript dropdown.",
+    ],
+  },
+  {
+    id: "frame-review",
+    title: "Approve and reject screenshots",
+    chips: ["Frame review", "Screenshots"],
+    keywords: ["frame", "frames", "screenshot", "screenshots", "approve", "reject", "teams overlay", "candidate", "image"],
+    body: [
+      "Open the Frames tab after processing a recording.",
+      "Approve screenshots that clearly show the application state needed by the guide.",
+      "Reject Teams overlays, participant tiles, title cards, transitions, or confusing application states.",
+      "Use Add Candidate to open the video picker, pause on the desired moment, and capture the frame manually.",
+      "Reviewer notes are preserved as guidance. Rejected images are not sent into guide generation.",
+    ],
+    action: { label: "Open Frames Tab", type: "tab", target: "frames" },
+  },
+  {
+    id: "qa",
+    title: "Understand QA status",
+    chips: ["QA", "Review"],
+    keywords: ["qa", "quality", "comments", "publish", "review", "warnings"],
+    body: [
+      "Create Guide runs local QA automatically after the DOCX is built. QA does not use AI tokens.",
+      "Use Re-run QA after regenerating the guide or changing screenshot approvals.",
+      "A review-only result usually means the guide exists but needs a human check, often because reviewer comments or warnings are present.",
+      "Before sharing externally, open the DOCX and confirm the body reads like a finished user guide with no internal pipeline language.",
+    ],
+  },
+  {
+    id: "download",
+    title: "Download or save the DOCX",
+    chips: ["Download DOCX", "Save As"],
+    keywords: ["download", "save", "docx", "filename", "export"],
+    body: [
+      "Download DOCX becomes available after Create Guide successfully builds the Word file.",
+      "Supported browsers open a system Save dialog so you can choose the folder and filename.",
+      "If the browser cannot open a native Save dialog, KCXDocumentor falls back to a normal browser download with a guide-specific filename.",
+      "The Artifacts tab also includes a DOCX download link for the selected session.",
+    ],
+    action: { label: "Open Artifacts Tab", type: "tab", target: "artifacts" },
+  },
+  {
+    id: "ai-spend",
+    title: "Track AI spend",
+    chips: ["AI spend", "Tokens"],
+    keywords: ["tokens", "cost", "spend", "usage", "month", "anthropic"],
+    body: [
+      "AI Spend shows documents, token totals, input/output split, and estimated cost by day, week, month, or year.",
+      "The header shows Current Month Spend for the calendar month.",
+      "Usage persists even when sessions or generated artifacts are deleted, so reporting remains auditable.",
+      "Failed AI attempts are counted when usage is available from the provider response.",
+    ],
+    action: { label: "Open AI Spend", type: "page", target: "usage" },
+  },
+  {
+    id: "full-guide",
+    title: "Open the full user guide",
+    chips: ["Full guide"],
+    keywords: ["manual", "documentation", "user guide", "help docx"],
+    body: [
+      "Download the full KCXDocumentor user guide when you need step-by-step workflow instructions, screenshots, troubleshooting notes, or first-test recommendations.",
+    ],
+    action: { label: "Download User Guide", type: "download", target: "/api/user-guide" },
+  },
+];
+
+document.addEventListener("DOMContentLoaded", async () => {
   bindEvents();
-  refreshAll();
+  await initializeAuth();
+  if (isAuthenticated()) {
+    refreshAll();
+  } else {
+    renderAll();
+  }
 });
 
 function bindEvents() {
+  els.loginButton.addEventListener("click", login);
+  els.logoutButton.addEventListener("click", logout);
   els.refreshAll.addEventListener("click", refreshAll);
+  els.helpButton.addEventListener("click", openHelpDrawer);
+  els.helpScrim.addEventListener("click", closeHelpDrawer);
+  els.closeHelpDrawer.addEventListener("click", closeHelpDrawer);
+  els.helpSearch.addEventListener("input", renderHelpDrawer);
+  els.helpChips.addEventListener("click", handleHelpChipClick);
+  els.helpResults.addEventListener("click", handleHelpResultClick);
+  els.helpResponse.addEventListener("click", handleHelpActionClick);
   els.globalUsageButton.addEventListener("click", () => {
     setActivePage("usage");
   });
@@ -145,6 +284,7 @@ function bindEvents() {
   els.frameGrid.addEventListener("change", handleFrameFieldChange);
   els.frameGrid.addEventListener("input", handleFrameNoteInput);
   els.sessionList.addEventListener("click", handleSessionListClick);
+  els.artifactList.addEventListener("click", handleArtifactDownloadClick);
   els.generateDraftButton.addEventListener("click", generateDraft);
   els.buildDocxButton.addEventListener("click", downloadDocx);
   els.qaDocxButton.addEventListener("click", runDocxQa);
@@ -152,9 +292,6 @@ function bindEvents() {
   els.clearSession.addEventListener("click", clearSelectedSession);
   els.recordingSelect.addEventListener("change", handleRecordingSelectionChange);
   els.sessionIdInput.addEventListener("input", updateActionAvailability);
-  els.transcriptSelect.addEventListener("change", () => {
-    els.transcriptPathInput.value = els.transcriptSelect.value;
-  });
 
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
@@ -173,6 +310,155 @@ function bindEvents() {
       loadUsageSummary();
     });
   });
+  els.usageSort?.addEventListener("change", () => {
+    state.usage.sort = els.usageSort.value || "date-desc";
+    renderUsage();
+  });
+}
+
+async function initializeAuth() {
+  state.auth.loading = true;
+  renderAuth();
+  try {
+    const payload = await fetchJsonWithoutAuth("/api/auth-config");
+    state.auth.config = payload.auth || { enabled: false };
+    if (!state.auth.config.enabled) {
+      state.auth.initialized = true;
+      state.auth.loading = false;
+      renderAuth();
+      return;
+    }
+    if (!window.msal?.PublicClientApplication) {
+      throw new Error("MSAL browser library is not available.");
+    }
+    state.auth.client = new window.msal.PublicClientApplication({
+      auth: {
+        clientId: state.auth.config.clientId,
+        authority: state.auth.config.authority,
+        redirectUri: state.auth.config.redirectUri || window.location.origin + "/",
+        postLogoutRedirectUri: state.auth.config.postLogoutRedirectUri || window.location.origin + "/",
+        navigateToLoginRequestUrl: false,
+      },
+      cache: {
+        cacheLocation: "localStorage",
+        storeAuthStateInCookie: false,
+      },
+      system: {
+        loggerOptions: {
+          piiLoggingEnabled: false,
+          logLevel: window.msal.LogLevel.Warning,
+        },
+      },
+    });
+    await state.auth.client.initialize?.();
+    const redirectResult = await state.auth.client.handleRedirectPromise();
+    const account = redirectResult?.account || state.auth.client.getActiveAccount() || state.auth.client.getAllAccounts()[0] || null;
+    if (account) {
+      state.auth.client.setActiveAccount(account);
+      state.auth.account = account;
+      await establishLocalAuthSession();
+    }
+    state.auth.initialized = true;
+    state.auth.error = "";
+  } catch (error) {
+    state.auth.error = error.message || "Authentication failed to initialize.";
+    logActivity(`Authentication setup failed: ${state.auth.error}`, "error");
+  } finally {
+    state.auth.loading = false;
+    renderAll();
+  }
+}
+
+async function login() {
+  if (!state.auth.client || !state.auth.config?.enabled) return;
+  await state.auth.client.loginRedirect({
+    scopes: authScopes(),
+    prompt: "select_account",
+  });
+}
+
+async function logout() {
+  if (!state.auth.client || !state.auth.account) return;
+  try {
+    await fetch("/api/logout", { method: "POST" });
+  } catch {
+    // Logout should continue even if the local session cookie is already gone.
+  }
+  await state.auth.client.logoutRedirect({
+    account: state.auth.account,
+    postLogoutRedirectUri: state.auth.config?.postLogoutRedirectUri || window.location.origin + "/",
+  });
+}
+
+async function establishLocalAuthSession() {
+  const token = await authToken();
+  if (!token) return;
+  await fetchJsonWithBearer("/api/auth-session", token);
+}
+
+function authScopes() {
+  return Array.isArray(state.auth.config?.scopes) && state.auth.config.scopes.length
+    ? state.auth.config.scopes
+    : ["openid", "profile"];
+}
+
+function isAuthenticated() {
+  return state.auth.config?.enabled === false || Boolean(state.auth.account);
+}
+
+async function authToken() {
+  if (state.auth.config?.enabled === false) return "";
+  if (!state.auth.client || !state.auth.account) {
+    throw new Error("Sign in is required.");
+  }
+  try {
+    const result = await state.auth.client.acquireTokenSilent({
+      account: state.auth.account,
+      scopes: authScopes(),
+    });
+    const idToken = result.idToken || state.auth.account.idToken || "";
+    if (!idToken) {
+      throw new Error("Could not acquire an ID token for the KCXDocumentor API proxy. Sign out and sign in again.");
+    }
+    return idToken;
+  } catch (error) {
+    if (isInteractionRequired(error)) {
+      await state.auth.client.loginRedirect({ scopes: authScopes() });
+      return "";
+    }
+    throw error;
+  }
+}
+
+function isInteractionRequired(error) {
+  const code = String(error?.errorCode || error?.error || "");
+  return error instanceof window.msal.InteractionRequiredAuthError
+    || ["interaction_required", "login_required", "consent_required"].includes(code);
+}
+
+async function authHeaders(baseHeaders = {}) {
+  const headers = { ...baseHeaders };
+  const token = await authToken();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  return headers;
+}
+
+async function fetchJsonWithoutAuth(path) {
+  const response = await fetch(path, { headers: { Accept: "application/json" } });
+  return parseApiResponse(response);
+}
+
+async function fetchJsonWithBearer(path, token) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  return parseApiResponse(response);
 }
 
 async function refreshAll() {
@@ -294,7 +580,6 @@ async function importTranscript() {
     upsertTranscript(imported);
     renderTranscripts();
     els.transcriptSelect.value = imported;
-    els.transcriptPathInput.value = imported;
   } catch (error) {
     logActivity(`Transcript import failed: ${error.message}`, "error");
   } finally {
@@ -320,19 +605,28 @@ async function processRecording(event) {
     noMediaTools: els.noMediaTools.checked,
   };
 
+  const transcriptMessage = payload.transcript
+    ? "Processing recording with the selected transcript..."
+    : "Processing recording locally. Whisper transcription may take a few minutes...";
+  setOperation(transcriptMessage, RECORDING_PROCESS_MESSAGES);
   setBusy(true);
   try {
     const result = await apiPost("/api/process", payload);
     const sessionId = result.sessionId || result.session?.sessionId || payload.sessionId;
-    logActivity(`Processing complete${sessionId ? ` for ${sessionId}` : ""}.`);
+    setOperation("Processing complete. Review frames, then choose Create Guide.");
+    logActivity(`Processing complete${sessionId ? ` for ${sessionId}` : ""}. Review frames before creating the guide.`);
     await refreshSessions();
     if (sessionId) {
       selectSession(sessionId, { load: true });
     }
   } catch (error) {
+    setOperation(`Recording processing failed: ${error.message}`);
     logActivity(`Processing failed: ${error.message}`, "error");
   } finally {
     setBusy(false);
+    window.setTimeout(() => {
+      if (!state.busy) setOperation("");
+    }, 9000);
   }
 }
 
@@ -416,16 +710,68 @@ async function runDocxQaForSession(sessionId) {
   return state.session.qa;
 }
 
-function downloadDocx() {
+async function downloadDocx() {
   const artifact = getArtifacts().find((item) => /user_guide.*\.docx$/i.test(item.name || item.path || ""));
-  const downloadUrl = artifact ? artifactDownloadUrl(artifact) : "";
+  if (!artifact) {
+    logActivity("Build a guide before downloading the DOCX.", "warn");
+    return;
+  }
+  await saveDocxArtifact(artifact);
+}
+
+async function handleArtifactDownloadClick(event) {
+  const link = event.target.closest(".artifact-download");
+  if (!link || !/\.docx$/i.test(link.getAttribute("download") || "")) {
+    return;
+  }
+  event.preventDefault();
+  const artifact = getArtifacts().find((item) => artifactDownloadUrl(item) === link.getAttribute("href"));
+  if (!artifact) {
+    return;
+  }
+  await saveDocxArtifact(artifact);
+}
+
+async function saveDocxArtifact(artifact) {
+  const downloadUrl = artifactDownloadUrl(artifact);
   if (!downloadUrl) {
     logActivity("Build a guide before downloading the DOCX.", "warn");
     return;
   }
+  const suggestedName = downloadNameForArtifact(artifact);
+  if (window.showSaveFilePicker) {
+    try {
+      const response = await fetch(downloadUrl, { headers: await authHeaders() });
+      if (!response.ok) {
+        throw new Error(`Download failed with HTTP ${response.status}`);
+      }
+      const handle = await window.showSaveFilePicker({
+        suggestedName,
+        types: [
+          {
+            description: "Word document",
+            accept: {
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
+            },
+          },
+        ],
+      });
+      const writable = await handle.createWritable();
+      await writable.write(await response.blob());
+      await writable.close();
+      logActivity(`Saved ${handle.name || suggestedName}.`);
+      return;
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        logActivity("DOCX save canceled.", "warn");
+        return;
+      }
+      logActivity(`Native save failed; using browser download. ${error.message}`, "warn");
+    }
+  }
   const link = document.createElement("a");
   link.href = downloadUrl;
-  link.download = artifact.name || "user_guide.anthropic.docx";
+  link.download = suggestedName;
   document.body.append(link);
   link.click();
   link.remove();
@@ -500,7 +846,7 @@ async function loadSession(sessionId) {
     state.selectedSessionId = getSessionId(state.session) || sessionId;
     state.generationMetadata = normalizeGenerationMetadata(state.session?.generation);
     await loadFrameReview(state.selectedSessionId);
-    if (!state.generationMetadata) {
+    if (!state.generationMetadata?.title) {
       await hydrateGenerationMetadata();
     }
     logActivity(`Loaded session ${state.selectedSessionId}.`);
@@ -519,7 +865,7 @@ async function refreshSessionState(sessionId) {
   state.selectedSessionId = getSessionId(state.session) || sessionId;
   state.generationMetadata = normalizeGenerationMetadata(state.session?.generation);
   await loadFrameReview(state.selectedSessionId);
-  if (!state.generationMetadata) {
+  if (!state.generationMetadata?.title) {
     await hydrateGenerationMetadata();
   }
   renderAll();
@@ -551,17 +897,17 @@ function requireSessionId() {
 }
 
 async function apiGet(path) {
-  const response = await fetch(path, { headers: { Accept: "application/json" } });
+  const response = await fetch(path, { headers: await authHeaders({ Accept: "application/json" }) });
   return parseApiResponse(response);
 }
 
 async function apiPost(path, payload) {
   const response = await fetch(path, {
     method: "POST",
-    headers: {
+    headers: await authHeaders({
       Accept: "application/json",
       "Content-Type": "application/json",
-    },
+    }),
     body: JSON.stringify(payload),
   });
   return parseApiResponse(response);
@@ -570,7 +916,7 @@ async function apiPost(path, payload) {
 async function apiPostForm(path, formData) {
   const response = await fetch(path, {
     method: "POST",
-    headers: { Accept: "application/json" },
+    headers: await authHeaders({ Accept: "application/json" }),
     body: formData,
   });
   return parseApiResponse(response);
@@ -757,10 +1103,26 @@ async function parseApiResponse(response) {
   const text = await response.text();
   const data = text ? safeJson(text) : {};
   if (!response.ok) {
+    if (response.status === 401) {
+      handleAuthRejected();
+    }
     const message = data.error || data.message || `${response.status} ${response.statusText}`;
     throw new Error(message);
   }
   return data;
+}
+
+function handleAuthRejected() {
+  if (state.auth.config?.enabled === false) return;
+  state.auth.account = null;
+  state.auth.client?.setActiveAccount?.(null);
+  state.recordings = [];
+  state.transcripts = [];
+  state.sessions = [];
+  state.session = null;
+  state.selectedSessionId = "";
+  state.auth.error = "Your sign-in session expired or could not be validated. Sign in again to continue.";
+  renderAll();
 }
 
 function safeJson(text) {
@@ -842,6 +1204,7 @@ function mergeSessionResult(current, result) {
 }
 
 function renderAll() {
+  renderAuth();
   renderPages();
   renderSelectedSessionPill();
   renderSummary();
@@ -849,6 +1212,28 @@ function renderAll() {
   renderTabs();
   renderReadiness();
   renderGlobalUsage();
+}
+
+function renderAuth() {
+  const enabled = state.auth.config?.enabled !== false;
+  const authenticated = isAuthenticated();
+  const loading = state.auth.loading;
+  document.body.classList.toggle("auth-required", enabled && !authenticated);
+  els.authGate.hidden = !enabled || authenticated;
+  els.authUserPanel.hidden = !enabled || !authenticated;
+  els.loginButton.disabled = loading || state.busy;
+  els.logoutButton.disabled = loading || state.busy;
+
+  if (loading) {
+    els.authStatusText.textContent = "Checking Microsoft sign-in status...";
+  } else if (state.auth.error) {
+    els.authStatusText.textContent = state.auth.error;
+  } else {
+    els.authStatusText.textContent = "Use your Microsoft account to access recording processing, guide generation, and AI spend reporting.";
+  }
+
+  const account = state.auth.account;
+  els.authUserName.textContent = account?.name || account?.username || "Signed in";
 }
 
 function setActivePage(page) {
@@ -860,6 +1245,11 @@ function setActivePage(page) {
 }
 
 function renderPages() {
+  if (!isAuthenticated()) {
+    els.workspacePage.hidden = true;
+    els.usagePage.hidden = true;
+    return;
+  }
   const usageActive = state.activePage === "usage";
   els.workspacePage.hidden = usageActive;
   els.usagePage.hidden = !usageActive;
@@ -899,7 +1289,7 @@ function renderRecordings() {
 }
 
 function renderTranscripts() {
-  const selected = els.transcriptPathInput.value || els.transcriptSelect.value;
+  const selected = els.transcriptSelect.value;
   els.transcriptSelect.innerHTML = "";
   els.transcriptSelect.append(new Option("No transcript selected", ""));
   state.transcripts.forEach((transcript) => {
@@ -975,12 +1365,20 @@ function handleRecordingSelectionChange() {
 
 function renderSelectedSessionPill() {
   if (state.selectedSessionId) {
-    els.selectedSessionPill.textContent = state.selectedSessionId;
+    els.selectedSessionPill.textContent = getSelectedSessionLabel();
     els.selectedSessionPill.className = "status-pill good";
   } else {
     els.selectedSessionPill.textContent = "No session selected";
     els.selectedSessionPill.className = "status-pill neutral";
   }
+}
+
+function getSelectedSessionLabel() {
+  const session = state.session || filteredSessionsForSelectedRecording().find((item) => getSessionId(item) === state.selectedSessionId);
+  if (!session) {
+    return state.selectedSessionId || "Session selected";
+  }
+  return session.title || session.sessionName || session.name || session.sessionId || session.id || state.selectedSessionId || "Session selected";
 }
 
 function renderSummary() {
@@ -1158,16 +1556,133 @@ function handleFrameInspectBackdrop(event) {
 }
 
 function handleGlobalKeydown(event) {
+  if (event.key === "Escape" && !els.helpDrawerShell.hidden) {
+    closeHelpDrawer();
+    return;
+  }
   if (event.key === "Escape" && state.frameInspect.open) {
     closeFrameInspect();
   }
+}
+
+function openHelpDrawer() {
+  els.helpDrawerShell.hidden = false;
+  document.body.classList.add("modal-open");
+  renderHelpDrawer();
+  window.requestAnimationFrame(() => els.helpSearch.focus({ preventScroll: true }));
+}
+
+function closeHelpDrawer() {
+  els.helpDrawerShell.hidden = true;
+  updateBodyModalState();
+  els.helpButton.focus({ preventScroll: true });
+}
+
+function handleHelpChipClick(event) {
+  const button = event.target.closest("[data-help-query]");
+  if (!button) return;
+  els.helpSearch.value = button.dataset.helpQuery || "";
+  renderHelpDrawer();
+}
+
+function handleHelpResultClick(event) {
+  const button = event.target.closest("[data-help-topic]");
+  if (!button) return;
+  const topic = HELP_TOPICS.find((item) => item.id === button.dataset.helpTopic);
+  if (!topic) return;
+  els.helpSearch.value = topic.title;
+  renderHelpDrawer();
+}
+
+function handleHelpActionClick(event) {
+  const button = event.target.closest("[data-help-action]");
+  if (!button) return;
+  const topic = HELP_TOPICS.find((item) => item.id === button.dataset.helpAction);
+  if (!topic?.action) return;
+
+  if (topic.action.type === "page") {
+    setActivePage(topic.action.target);
+    closeHelpDrawer();
+    return;
+  }
+  if (topic.action.type === "tab") {
+    state.activeTab = topic.action.target;
+    renderTabs();
+    closeHelpDrawer();
+    return;
+  }
+  if (topic.action.type === "download") {
+    const link = document.createElement("a");
+    link.href = topic.action.target;
+    link.download = "KCXDocumentor User Guide.docx";
+    document.body.append(link);
+    link.click();
+    link.remove();
+  }
+}
+
+function renderHelpDrawer() {
+  const query = els.helpSearch.value.trim().toLowerCase();
+  const matches = query
+    ? HELP_TOPICS
+        .map((topic) => ({ topic, score: helpTopicScore(topic, query) }))
+        .filter((item) => item.score > 0)
+        .sort((left, right) => right.score - left.score)
+        .map((item) => item.topic)
+    : HELP_TOPICS.slice(0, 5);
+  const activeTopic = matches[0] || HELP_TOPICS[0];
+
+  els.helpChips.innerHTML = HELP_TOPICS.slice(0, 6)
+    .map((topic) => `<button class="help-chip" type="button" data-help-query="${escapeAttribute(topic.chips[0] || topic.title)}">${escapeHtml(topic.chips[0] || topic.title)}</button>`)
+    .join("");
+
+  els.helpResults.innerHTML = matches.length
+    ? matches.map((topic) => `
+        <button class="help-result ${topic.id === activeTopic.id ? "help-result--active" : ""}" type="button" data-help-topic="${escapeAttribute(topic.id)}">
+          ${escapeHtml(topic.title)}
+        </button>
+      `).join("")
+    : `<div class="status-pill warn">No help topics matched that search.</div>`;
+
+  els.helpResponse.innerHTML = activeTopic
+    ? `
+      <div class="help-answer">
+        <h3>${escapeHtml(activeTopic.title)}</h3>
+        ${activeTopic.body.map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`).join("")}
+      </div>
+      ${activeTopic.action ? `<button class="secondary help-action" type="button" data-help-action="${escapeAttribute(activeTopic.id)}">${escapeHtml(activeTopic.action.label)}</button>` : ""}
+    `
+    : `<p class="muted">Try another search or contact KCX support.</p>`;
+}
+
+function helpSearchText(topic) {
+  return [
+    topic.title,
+    ...(topic.chips || []),
+    ...(topic.keywords || []),
+    ...(topic.body || []),
+  ].join(" ").toLowerCase();
+}
+
+function helpTopicScore(topic, query) {
+  const title = String(topic.title || "").toLowerCase();
+  const chips = (topic.chips || []).join(" ").toLowerCase();
+  const keywords = (topic.keywords || []).join(" ").toLowerCase();
+  const body = (topic.body || []).join(" ").toLowerCase();
+  let score = 0;
+  if (title.includes(query)) score += 12;
+  if (chips.includes(query)) score += 10;
+  if (keywords.includes(query)) score += 8;
+  if (body.includes(query)) score += 2;
+  if (helpSearchText(topic).includes(query)) score += 1;
+  return score;
 }
 
 function renderFrameInspect() {
   const frame = getFrameCandidates().find((candidate) => getFrameId(candidate) === state.frameInspect.frameId);
   const isOpen = state.frameInspect.open && Boolean(frame);
   els.frameInspectModal.hidden = !isOpen;
-  document.body.classList.toggle("modal-open", isOpen);
+  updateBodyModalState();
   if (!isOpen || !frame) {
     els.frameInspectImage.removeAttribute("src");
     els.frameInspectImage.alt = "";
@@ -1198,6 +1713,12 @@ function renderFrameInspect() {
     </dl>
   `;
   els.closeFrameInspect.focus({ preventScroll: true });
+}
+
+function updateBodyModalState() {
+  const helpOpen = els.helpDrawerShell && !els.helpDrawerShell.hidden;
+  const frameOpen = state.frameInspect.open && !els.frameInspectModal.hidden;
+  document.body.classList.toggle("modal-open", Boolean(helpOpen || frameOpen));
 }
 
 function handleFrameFieldChange(event) {
@@ -1313,8 +1834,9 @@ function renderArtifacts() {
   artifacts.forEach((artifact) => {
     const item = document.createElement("article");
     const downloadUrl = artifactDownloadUrl(artifact);
+    const downloadName = downloadNameForArtifact(artifact);
     const downloadLink = downloadUrl
-      ? `<a class="artifact-download" href="${escapeAttribute(downloadUrl)}" download>Download</a>`
+      ? `<a class="artifact-download" href="${escapeAttribute(downloadUrl)}" download="${escapeAttribute(downloadName)}">Download</a>`
       : "";
     item.innerHTML = `
       <div class="artifact-row">
@@ -1365,13 +1887,19 @@ function renderUsage() {
     button.classList.toggle("active", button.dataset.usageRange === state.usage.range);
     button.disabled = state.usage.loading;
   });
+  if (els.usageSort) {
+    els.usageSort.value = state.usage.sort || "date-desc";
+    els.usageSort.disabled = state.usage.loading;
+  }
 
   const summary = state.usage.summary;
   const totals = summary?.totals || {};
   els.usageDocumentMetric.textContent = formatNumber(totals.documents) || "--";
   els.usageTokenMetric.textContent = formatNumber(totals.totalTokens) || "--";
   els.usageInOutMetric.textContent = `${formatNumber(totals.inputTokens) || "--"} / ${formatNumber(totals.outputTokens) || "--"}`;
+  els.usagePageMetric.textContent = formatNumber(totals.pageCount) || "--";
   els.usageCostMetric.textContent = formatCost(totals.estimatedCostUSD) || "--";
+  els.usageCostPerPageMetric.textContent = formatCost(totals.costPerPageUSD) || "--";
 
   if (state.usage.loading) {
     els.usageStatus.textContent = `Loading ${state.usage.range} usage...`;
@@ -1398,30 +1926,118 @@ function renderUsage() {
     ? ` Includes ${formatNumber(totals.failedAttempts)} failed AI attempt${Number(totals.failedAttempts) === 1 ? "" : "s"}.`
     : "";
   els.usageStatus.textContent = `${rangeLabel(summary.range)} totals generated ${formatDateTime(summary.generatedAt) || "now"}.${failedText}`;
-  const buckets = Array.isArray(summary.buckets) ? summary.buckets : [];
-  if (buckets.length === 0) {
+  const rows = usageDocumentRows(summary);
+  const rowTotals = rows.reduce(
+    (acc, row) => {
+      acc.totalTokens += Number(row.totalTokens || 0);
+      acc.pageCount += Number(row.pageCount || 0);
+      acc.estimatedCostUSD += Number(row.estimatedCostUSD || 0);
+      return acc;
+    },
+    { totalTokens: 0, pageCount: 0, estimatedCostUSD: 0 }
+  );
+  rowTotals.costPerPageUSD = costPerPage(rowTotals.estimatedCostUSD, rowTotals.pageCount);
+  if (rows.length === 0) {
     els.usageBreakdown.className = "usage-breakdown empty-state";
     els.usageBreakdown.textContent = "No generated documents found for this range.";
     return;
   }
 
   els.usageBreakdown.className = "usage-breakdown";
-  els.usageBreakdown.innerHTML = "";
+  els.usageBreakdown.innerHTML = `
+    <table class="usage-table" aria-label="Individual generated document usage">
+      <thead>
+        <tr>
+          <th scope="col">Document</th>
+          <th scope="col">User</th>
+          <th scope="col">Generated</th>
+          <th scope="col">Model</th>
+          <th scope="col">Status</th>
+          <th scope="col" class="numeric">Tokens</th>
+          <th scope="col" class="numeric">Pages</th>
+          <th scope="col" class="numeric">Cost</th>
+          <th scope="col" class="numeric">Cost / Page</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map((row) => `
+          <tr>
+            <td>
+              <strong>${escapeHtml(row.documentLabel)}</strong>
+              <span>${escapeHtml(row.sessionLabel)}</span>
+            </td>
+            <td>
+              <strong>${escapeHtml(row.userLabel)}</strong>
+              <span>${escapeHtml(row.userDetail)}</span>
+            </td>
+            <td>${escapeHtml(row.generatedAtLabel)}</td>
+            <td>${escapeHtml(row.modelLabel)}</td>
+            <td>${escapeHtml(row.statusLabel)}</td>
+            <td class="numeric">${escapeHtml(formatNumber(row.totalTokens) || "0")}</td>
+            <td class="numeric">${escapeHtml(formatPageCount(row.pageCount))}</td>
+            <td class="numeric">${escapeHtml(formatCost(row.estimatedCostUSD) || "$0.0000")}</td>
+            <td class="numeric">${escapeHtml(formatCostPerPage(row.costPerPageUSD, row.pageCount))}</td>
+          </tr>
+        `).join("")}
+      </tbody>
+      <tfoot>
+        <tr>
+          <th scope="row">Tally</th>
+          <td colspan="4">${escapeHtml(formatNumber(rows.length) || "0")} documents</td>
+          <td class="numeric">${escapeHtml(formatNumber(rowTotals.totalTokens) || "0")}</td>
+          <td class="numeric">${escapeHtml(formatNumber(rowTotals.pageCount) || "--")}</td>
+          <td class="numeric">${escapeHtml(formatCost(rowTotals.estimatedCostUSD) || "$0.0000")}</td>
+          <td class="numeric">${escapeHtml(formatCost(rowTotals.costPerPageUSD) || "--")}</td>
+        </tr>
+      </tfoot>
+    </table>
+  `;
+}
+
+function usageDocumentRows(summary) {
+  const buckets = Array.isArray(summary?.buckets) ? summary.buckets : [];
+  const rows = [];
   buckets.forEach((bucket) => {
-    const bucketTotals = normalizeUsageTotals(bucket.totals || bucket);
-    const item = document.createElement("article");
-    item.innerHTML = `
-      <div>
-        <strong>${escapeHtml(formatUsageBucket(bucket))}</strong>
-        <span>${escapeHtml(formatUsageBucketAttempts(bucketTotals))}</span>
-      </div>
-      <div>
-        <span>${escapeHtml(formatNumber(bucketTotals.totalTokens) || "0")} tokens</span>
-        <strong>${escapeHtml(formatCost(bucketTotals.estimatedCostUSD) || "$0.0000")}</strong>
-      </div>
-    `;
-    els.usageBreakdown.append(item);
+    const documents = Array.isArray(bucket?.documents) ? bucket.documents : [];
+    documents.forEach((document) => {
+      if (String(document?.status || "succeeded").toLowerCase() === "failed") {
+        return;
+      }
+      const usage = firstObject(document?.usage);
+      const generatedBy = firstObject(document?.generatedBy, document?.user);
+      const pageCount = numberValue(document?.pageCount ?? document?.page_count ?? usage?.pageCount ?? usage?.page_count ?? usage?.pages) || 0;
+      const estimatedCostUSD = numberValue(usage?.estimatedCostUSD ?? usage?.estimated_cost_usd ?? usage?.costUSD ?? usage?.cost_usd) || 0;
+      const userName = String(generatedBy?.name || generatedBy?.username || "").trim();
+      const userDetail = String(generatedBy?.username || generatedBy?.oid || "").trim();
+      rows.push({
+        generatedAtRaw: document?.generatedAt || "",
+        generatedAtLabel: formatDateTime(document?.generatedAt) || "--",
+        documentLabel: document?.title || "Untitled document",
+        sessionLabel: document?.sessionId || "No session id",
+        userLabel: userName || "Unknown user",
+        userDetail: userDetail && userDetail !== userName ? userDetail : "",
+        modelLabel: modelName(document?.model) || "--",
+        statusLabel: String(document?.status || "succeeded"),
+        totalTokens: numberValue(usage?.totalTokens ?? usage?.total_tokens) || 0,
+        pageCount,
+        estimatedCostUSD,
+        costPerPageUSD: costPerPage(estimatedCostUSD, pageCount),
+      });
+    });
   });
+  rows.sort(compareUsageRows);
+  return rows;
+}
+
+function compareUsageRows(a, b) {
+  const sort = state.usage.sort || "date-desc";
+  if (sort === "user-asc" || sort === "user-desc") {
+    const userCompare = String(a.userLabel || "").localeCompare(String(b.userLabel || ""), undefined, { sensitivity: "base" });
+    if (userCompare !== 0) {
+      return sort === "user-asc" ? userCompare : -userCompare;
+    }
+  }
+  return String(b.generatedAtRaw || "").localeCompare(String(a.generatedAtRaw || ""));
 }
 
 function renderGlobalUsage() {
@@ -1547,7 +2163,7 @@ function getArtifacts() {
 }
 
 async function hydrateGenerationMetadata() {
-  if (state.generationMetadata) return;
+  if (state.generationMetadata?.title) return;
   const draftArtifact = getArtifacts().find((artifact) => /guide_draft.*\.json$/i.test(artifact.name || artifact.path || ""));
   const sessionId = state.selectedSessionId || getSessionId(state.session);
   if (!draftArtifact || !sessionId) return;
@@ -1558,7 +2174,7 @@ async function hydrateGenerationMetadata() {
     const response = await fetch(url, { headers: { Accept: "application/json" } });
     if (!response.ok) return;
     const draft = await response.json();
-    state.generationMetadata = normalizeGenerationMetadata(draft);
+    state.generationMetadata = normalizeGenerationMetadata(draft) || state.generationMetadata;
   } catch {
     state.generationMetadata = null;
   }
@@ -1600,11 +2216,12 @@ function normalizeGenerationMetadata(draft) {
   const generatedAt = draft?.generatedAt || draft?.generated_at || draft?.createdUtc || draft?.createdAt
     || generation?.generatedAt || generation?.generated_at || generation?.createdUtc || generation?.createdAt
     || guideDraft?.generatedAt || guideDraft?.generated_at || "";
+  const title = draft?.title || draft?.document?.title || generation?.title || guideDraft?.title || guideDraft?.document?.title || "";
 
-  if (!model && !generatedAt && !Number.isFinite(totalTokens) && !Number.isFinite(estimatedCostUSD)) {
+  if (!title && !model && !generatedAt && !Number.isFinite(totalTokens) && !Number.isFinite(estimatedCostUSD)) {
     return null;
   }
-  return { model, generatedAt, inputTokens, outputTokens, totalTokens, estimatedCostUSD };
+  return { title, model, generatedAt, inputTokens, outputTokens, totalTokens, estimatedCostUSD };
 }
 
 function normalizeUsageSummary(payload, fallbackRange) {
@@ -1631,6 +2248,8 @@ function normalizeUsageTotals(totals) {
       ? Number(inputTokens || 0) + Number(outputTokens || 0)
       : null
   );
+  const pageCount = numberValue(totals?.pageCount ?? totals?.page_count ?? totals?.pages);
+  const estimatedCostUSD = numberValue(totals?.estimatedCostUSD ?? totals?.estimated_cost_usd ?? totals?.costUSD ?? totals?.cost_usd);
   return {
     documents: numberValue(totals?.documents ?? totals?.documentCount ?? totals?.generatedDocuments ?? totals?.count),
     attempts: numberValue(totals?.attempts ?? totals?.attemptCount),
@@ -1638,8 +2257,18 @@ function normalizeUsageTotals(totals) {
     inputTokens,
     outputTokens,
     totalTokens,
-    estimatedCostUSD: numberValue(totals?.estimatedCostUSD ?? totals?.estimated_cost_usd ?? totals?.costUSD ?? totals?.cost_usd),
+    pageCount,
+    estimatedCostUSD,
+    costPerPageUSD: numberValue(totals?.costPerPageUSD ?? totals?.cost_per_page_usd) ?? costPerPage(estimatedCostUSD, pageCount),
   };
+}
+
+function costPerPage(cost, pageCount) {
+  const pages = Number(pageCount || 0);
+  if (!Number.isFinite(pages) || pages <= 0) {
+    return 0;
+  }
+  return Number(cost || 0) / pages;
 }
 
 function formatUsageBucketAttempts(totals) {
@@ -1682,6 +2311,50 @@ function artifactDownloadUrl(artifact) {
   return `/api/session?sessionId=${encodeURIComponent(sessionId)}&asset=${encodeURIComponent(name)}`;
 }
 
+function downloadNameForArtifact(artifact) {
+  const path = artifact?.path || artifact?.relativePath || "";
+  const name = artifact?.name || path.split("/").pop() || "";
+  if (/user_guide.*\.docx$/i.test(name)) {
+    return guideDocxDownloadName();
+  }
+  return safeDownloadName(name || "kcxdocumentor-artifact.json");
+}
+
+function guideDocxDownloadName() {
+  const title = state.generationMetadata?.title
+    || state.session?.generation?.title
+    || state.session?.draftSummary?.title
+    || state.session?.guideDraft?.title
+    || state.session?.title
+    || sessionTitleFromSource();
+  const sessionId = state.selectedSessionId || getSessionId(state.session);
+  const parts = [title, sessionId].filter(Boolean).map((part) => fileSlug(part, 72)).filter(Boolean);
+  const base = parts.length ? parts.join("-") : "kcxdocumentor-guide";
+  return `${base}.docx`;
+}
+
+function sessionTitleFromSource() {
+  const source = basename(state.session?.sourceFile || state.session?.recording?.sourceFile || els.recordingSelect.value || "");
+  const withoutExtension = source.replace(/\.[^.]+$/, "");
+  return withoutExtension || "kcxdocumentor-guide";
+}
+
+function safeDownloadName(name) {
+  const extension = name.includes(".") ? `.${name.split(".").pop()}` : "";
+  const base = extension ? name.slice(0, -extension.length) : name;
+  return `${fileSlug(base, 100) || "kcxdocumentor-artifact"}${extension.toLowerCase()}`;
+}
+
+function fileSlug(value, maxLength = 90) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, maxLength)
+    .replace(/-+$/g, "");
+}
+
 function getRecordingLabel(recording) {
   if (typeof recording === "string") return recording;
   return recording.name || recording.sourceName || recording.fileName || recording.path || "recording";
@@ -1703,7 +2376,7 @@ function getTranscriptValue(transcript) {
 }
 
 function getSelectedTranscript() {
-  return els.transcriptPathInput.value.trim() || els.transcriptSelect.value;
+  return els.transcriptSelect.value;
 }
 
 function upsertTranscript(transcript) {
@@ -1800,6 +2473,16 @@ function formatCost(value) {
   return `$${Number(value).toFixed(4)}`;
 }
 
+function formatPageCount(value) {
+  const pages = Number(value || 0);
+  return Number.isFinite(pages) && pages > 0 ? formatNumber(pages) : "--";
+}
+
+function formatCostPerPage(value, pageCount) {
+  const pages = Number(pageCount || 0);
+  return Number.isFinite(pages) && pages > 0 ? formatCost(value) || "--" : "--";
+}
+
 function renderTags(values, className = "") {
   return values.slice(0, 8).map((value) => `<span class="tag ${className}">${escapeHtml(value)}</span>`).join("");
 }
@@ -1812,6 +2495,7 @@ function renderReasons(reasons = []) {
 function setBusy(isBusy) {
   state.busy = isBusy;
   document.body.classList.toggle("busy", isBusy);
+  renderAuth();
   renderOperationStatus();
   updateActionAvailability();
 }
@@ -1846,6 +2530,25 @@ function renderOperationStatus() {
 }
 
 function updateActionAvailability() {
+  if (!isAuthenticated()) {
+    [
+      els.refreshAll,
+      els.importRecordingButton,
+      els.importTranscriptButton,
+      els.processButton,
+      els.generateDraftButton,
+      els.buildDocxButton,
+      els.qaDocxButton,
+      els.reloadSession,
+      els.clearSession,
+      els.addFrameButton,
+      els.addFrameTimestampButton,
+      els.useVideoTimeButton,
+    ].forEach((button) => {
+      if (button) button.disabled = true;
+    });
+    return;
+  }
   const hasRecording = Boolean(els.recordingSelect.value);
   const hasSession = Boolean(state.selectedSessionId || els.sessionIdInput.value.trim());
   const hasLoadedSession = Boolean(state.session);

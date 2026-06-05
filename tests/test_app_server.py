@@ -11,10 +11,16 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from docx import Document
 
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_SERVER = ROOT / "scripts" / "app_server.py"
+
+
+@pytest.fixture(autouse=True)
+def clear_remote_usage_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KCXDOC_REMOTE_API_BASE_URL", raising=False)
 
 
 def load_app_server():
@@ -105,6 +111,53 @@ def test_json_response_builder_is_utf8_bytes_when_exposed() -> None:
     }
 
 
+def test_auth_config_uses_local_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    monkeypatch.setenv("KCXDOC_AUTH_ENABLED", "true")
+    monkeypatch.setenv("KCXDOC_AUTH_TENANT_ID", "tenant-123")
+    monkeypatch.setenv("KCXDOC_AUTH_CLIENT_ID", "client-456")
+    monkeypatch.setenv("KCXDOC_AUTH_AUTHORITY", "https://login.microsoftonline.com/tenant-123")
+    monkeypatch.setenv("KCXDOC_AUTH_REDIRECT_URI", "http://127.0.0.1:8765/")
+    monkeypatch.setenv("KCXDOC_AUTH_POST_LOGOUT_REDIRECT_URI", "http://127.0.0.1:8765/")
+    monkeypatch.setenv("KCXDOC_AUTH_SCOPES", "openid profile")
+
+    config = module.get_auth_config()
+
+    assert config == {
+        "enabled": True,
+        "tenantId": "tenant-123",
+        "clientId": "client-456",
+        "authority": "https://login.microsoftonline.com/tenant-123",
+        "redirectUri": "http://127.0.0.1:8765/",
+        "postLogoutRedirectUri": "http://127.0.0.1:8765/",
+        "scopes": ["openid", "profile"],
+    }
+
+
+def test_auth_session_cookie_is_signed_and_expires(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    monkeypatch.setenv("KCXDOC_AUTH_ENABLED", "true")
+    monkeypatch.setenv("KCXDOC_AUTH_TENANT_ID", "tenant-123")
+    monkeypatch.setenv("KCXDOC_AUTH_CLIENT_ID", "client-456")
+    monkeypatch.setattr(module, "AUTH_SESSION_SECRET", "unit-test-secret")
+    monkeypatch.setattr(module, "time_now", lambda: 1000)
+
+    cookie = module.build_auth_session_cookie(
+        {
+            "aud": "client-456",
+            "iss": "https://login.microsoftonline.com/tenant-123/v2.0",
+            "sub": "user-1",
+            "exp": 1600,
+        },
+        600,
+    )
+
+    assert module.validate_auth_session_cookie(cookie) is True
+    assert module.validate_auth_session_cookie(cookie.replace("a", "b", 1)) is False
+    monkeypatch.setattr(module, "time_now", lambda: 1601)
+    assert module.validate_auth_session_cookie(cookie) is False
+
+
 def test_safe_path_helper_accepts_children_and_rejects_traversal(tmp_path: Path) -> None:
     module = load_app_server()
     safe_path = find_callable(module, "safe_join", "resolve_safe_path", "safe_resolve")
@@ -183,6 +236,12 @@ def test_usage_summary_aggregates_generation_reports_by_range(tmp_path: Path, mo
                 "sessionId": "session-a",
                 "title": "Guide A",
                 "model": "claude-sonnet-4-6",
+                "pageCount": 4,
+                "generatedBy": {
+                    "oid": "user-a",
+                    "name": "Analyst One",
+                    "username": "analyst.one@example.com",
+                },
                 "usage": {
                     "inputTokens": 1000,
                     "outputTokens": 200,
@@ -200,6 +259,7 @@ def test_usage_summary_aggregates_generation_reports_by_range(tmp_path: Path, mo
                 "sessionId": "session-b",
                 "title": "Guide B",
                 "model": "claude-sonnet-4-6",
+                "pageCount": 6,
                 "usage": {
                     "inputTokens": 3000,
                     "outputTokens": 400,
@@ -213,8 +273,8 @@ def test_usage_summary_aggregates_generation_reports_by_range(tmp_path: Path, mo
     monkeypatch.setattr(module, "GENERATED_ROOT", generated_root)
     monkeypatch.setattr(module, "USAGE_DB_PATH", tmp_path / "artifacts" / "usage" / "empty.sqlite3")
 
-    daily = module.read_usage_summary("day")
-    weekly = module.read_usage_summary("week")
+    daily = module.read_local_usage_summary("day")
+    weekly = module.read_local_usage_summary("week")
 
     assert daily["totals"] == {
         "documents": 2,
@@ -223,12 +283,108 @@ def test_usage_summary_aggregates_generation_reports_by_range(tmp_path: Path, mo
         "inputTokens": 4000,
         "outputTokens": 600,
         "totalTokens": 4600,
+        "pageCount": 10,
         "estimatedCostUSD": 0.021,
+        "costPerPageUSD": 0.0021,
     }
     assert [bucket["label"] for bucket in daily["buckets"]] == ["2026-06-04", "2026-06-05"]
     assert daily["buckets"][0]["documents"][0]["sessionId"] == "session-a"
+    assert daily["buckets"][0]["documents"][0]["generatedBy"] == {
+        "oid": "user-a",
+        "name": "Analyst One",
+        "username": "analyst.one@example.com",
+    }
+    assert daily["buckets"][0]["documents"][0]["usage"]["pageCount"] == 4
+    assert daily["buckets"][0]["documents"][0]["usage"]["costPerPageUSD"] == 0.0015
     assert weekly["buckets"][0]["label"] == "2026-W23"
     assert weekly["buckets"][0]["totals"]["documents"] == 2
+    assert weekly["buckets"][0]["totals"]["pageCount"] == 10
+
+
+def test_usage_summary_prefers_remote_api_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    monkeypatch.setenv("KCXDOC_REMOTE_API_BASE_URL", "https://kcxdocumentor-ai-dev.azurewebsites.net/")
+
+    def fake_fetch(base_url: str, range_name: str, timeout_seconds: float = 5.0, bearer_token: str = "") -> dict[str, Any]:
+        assert base_url == "https://kcxdocumentor-ai-dev.azurewebsites.net"
+        assert range_name == "week"
+        assert bearer_token == "token-123"
+        return {
+            "range": "week",
+            "generatedAt": "2026-06-05T12:00:00Z",
+            "totals": {
+                "documents": 1,
+                "attempts": 1,
+                "failedAttempts": 0,
+                "inputTokens": 100,
+                "outputTokens": 20,
+                "totalTokens": 120,
+                "pageCount": 4,
+                "estimatedCostUSD": 0.012,
+                "costPerPageUSD": 0.003,
+            },
+            "buckets": [{"label": "2026-W23", "totals": {"documents": 1}, "documents": []}],
+        }
+
+    monkeypatch.setattr(module, "fetch_remote_usage_summary", fake_fetch)
+
+    summary = module.read_usage_summary("week", bearer_token="token-123")
+
+    assert summary["range"] == "week"
+    assert summary["totals"]["documents"] == 1
+    assert summary["totals"]["costPerPageUSD"] == 0.003
+    assert summary["buckets"][0]["label"] == "2026-W23"
+    assert summary["days"] == []
+
+
+def test_usage_summary_surfaces_remote_api_failure_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    monkeypatch.setenv("KCXDOC_REMOTE_API_BASE_URL", "https://kcxdocumentor-ai-dev.azurewebsites.net")
+    monkeypatch.setattr(module, "fetch_remote_usage_summary", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("offline")))
+
+    with pytest.raises(OSError, match="offline"):
+        module.read_usage_summary("day", bearer_token="token-123")
+
+
+def test_usage_summary_backfills_page_count_from_generated_docx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    generated_root = tmp_path / "artifacts" / "generated"
+    session_dir = generated_root / "session-with-docx"
+    session_dir.mkdir(parents=True)
+    (session_dir / "generation_report.json").write_text(
+        json.dumps(
+            {
+                "generatedAt": "2026-06-04T16:34:09Z",
+                "sessionId": "session-with-docx",
+                "title": "Guide With Pages",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "inputTokens": 5000,
+                    "outputTokens": 1000,
+                    "totalTokens": 6000,
+                    "estimatedCostUSD": 0.03,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    doc = Document()
+    doc.add_paragraph("First page content.")
+    doc.add_page_break()
+    doc.add_paragraph("Second page content.")
+    doc.add_page_break()
+    doc.add_paragraph("Third page content.")
+    doc.save(session_dir / "user_guide.anthropic.docx")
+    monkeypatch.setattr(module, "GENERATED_ROOT", generated_root)
+    monkeypatch.setattr(module, "USAGE_DB_PATH", tmp_path / "artifacts" / "usage" / "empty.sqlite3")
+
+    summary = module.read_local_usage_summary("month")
+
+    assert summary["totals"]["pageCount"] >= 3
+    assert summary["totals"]["costPerPageUSD"] > 0
+    document = summary["buckets"][0]["documents"][0]
+    assert document["usage"]["pageCount"] >= 3
+    assert document["usage"]["costPerPageUSD"] > 0
 
 
 def test_usage_summary_keeps_db_entries_after_session_report_is_deleted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -270,13 +426,15 @@ def test_usage_summary_keeps_db_entries_after_session_report_is_deleted(tmp_path
     monkeypatch.setattr(module, "GENERATED_ROOT", generated_root)
     monkeypatch.setattr(module, "USAGE_DB_PATH", db_path)
 
-    summary = module.read_usage_summary("month")
+    summary = module.read_local_usage_summary("month")
 
     assert summary["totals"]["documents"] == 1
     assert summary["totals"]["attempts"] == 1
     assert summary["totals"]["failedAttempts"] == 0
     assert summary["totals"]["totalTokens"] == 1500
+    assert summary["totals"]["pageCount"] == 0
     assert summary["totals"]["estimatedCostUSD"] == 0.0081
+    assert summary["totals"]["costPerPageUSD"] == 0.0
     assert summary["buckets"][0]["documents"][0]["sessionId"] == "deleted-session"
 
 
@@ -310,16 +468,115 @@ def test_usage_summary_counts_failed_attempt_spend_without_document(tmp_path: Pa
     monkeypatch.setattr(module, "GENERATED_ROOT", generated_root)
     monkeypatch.setattr(module, "USAGE_DB_PATH", tmp_path / "artifacts" / "usage" / "empty.sqlite3")
 
-    summary = module.read_usage_summary("day")
+    summary = module.read_local_usage_summary("day")
 
     assert summary["totals"]["documents"] == 0
     assert summary["totals"]["attempts"] == 1
     assert summary["totals"]["failedAttempts"] == 1
     assert summary["totals"]["totalTokens"] == 2500
+    assert summary["totals"]["pageCount"] == 0
     assert summary["totals"]["estimatedCostUSD"] == 0.0135
+    assert summary["totals"]["costPerPageUSD"] == 0.0
     document = summary["buckets"][0]["documents"][0]
     assert document["status"] == "failed"
     assert document["errorMessage"] == "Anthropic returned invalid guide JSON."
+
+
+def test_export_usage_records_for_remote_uses_sqlite_records(tmp_path: Path) -> None:
+    module = load_app_server()
+    db_path = tmp_path / "artifacts" / "usage" / "generation_usage.sqlite3"
+    db_path.parent.mkdir(parents=True)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE generation_usage (
+                generation_run_id TEXT PRIMARY KEY,
+                generated_at TEXT,
+                recorded_at TEXT,
+                session_id TEXT,
+                title TEXT,
+                provider TEXT,
+                model TEXT,
+                prompt_version TEXT,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                total_tokens INTEGER,
+                estimated_cost_usd REAL,
+                page_count INTEGER,
+                status TEXT,
+                error_message TEXT,
+                report_json TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO generation_usage VALUES (
+                'run-a', '2026-06-04T16:34:09Z', '2026-06-04T16:35:00Z',
+                'session-a', 'Guide A', 'anthropic', 'claude-sonnet-4-6',
+                'guide-draft-v1', 1000, 200, 1200, 0.006, 4,
+                'succeeded', '', '{}'
+            )
+            """
+        )
+
+    payload = module.export_usage_records_for_remote(db_path)
+
+    assert payload["schemaVersion"] == 1
+    assert payload["source"] == "local-sqlite"
+    assert payload["records"] == [
+        {
+            "generationRunId": "run-a",
+            "generatedAt": "2026-06-04T16:34:09Z",
+            "sessionId": "session-a",
+            "title": "Guide A",
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-6",
+            "promptVersion": "guide-draft-v1",
+            "inputTokens": 1000,
+            "outputTokens": 200,
+            "totalTokens": 1200,
+            "estimatedCostUSD": 0.006,
+            "pageCount": 4,
+            "status": "succeeded",
+            "errorMessage": "",
+        }
+    ]
+
+
+def test_migrate_usage_records_posts_local_export_to_remote(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    posted: dict[str, Any] = {}
+    monkeypatch.setenv("KCXDOC_REMOTE_API_BASE_URL", "https://kcxdocumentor-ai-dev.azurewebsites.net")
+    monkeypatch.setattr(
+        module,
+        "export_usage_records_for_remote",
+        lambda: {
+            "schemaVersion": 1,
+            "source": "local-sqlite",
+            "records": [{"generationRunId": "run-a", "usage": {"totalTokens": 1200}}],
+        },
+    )
+
+    def fake_post(base_url: str, records: list[dict[str, Any]], timeout_seconds: float = 15.0, bearer_token: str = "") -> dict[str, Any]:
+        posted["base_url"] = base_url
+        posted["records"] = records
+        posted["bearer_token"] = bearer_token
+        posted["timeout_seconds"] = timeout_seconds
+        return {"imported": 1, "records": [{"generationRunId": "run-a", "status": "succeeded"}]}
+
+    monkeypatch.setattr(module, "post_remote_usage_records", fake_post)
+
+    result = module.migrate_usage_records(bearer_token="token-123")
+
+    assert result["exported"] == 1
+    assert result["imported"] == 1
+    assert posted == {
+        "base_url": "https://kcxdocumentor-ai-dev.azurewebsites.net",
+        "records": [{"generationRunId": "run-a", "usage": {"totalTokens": 1200}}],
+        "bearer_token": "token-123",
+        "timeout_seconds": 30.0,
+    }
 
 
 def test_session_source_video_uses_manifest_recording_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -516,6 +773,25 @@ def test_health_or_tooling_helper_reports_expected_local_dependencies() -> None:
     if "anthropic" in serialized or "api" in serialized:
         assert "sk-ant-" not in serialized
     assert "ok" in status or "ready" in status or "tools" in status or "dependencies" in status
+
+
+def test_health_reports_configured_external_whisper_share(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    whisper_cli = tmp_path / "external" / "whisper" / "bin" / "whisper-cli"
+    whisper_model = tmp_path / "external" / "whisper" / "models" / "ggml-base.en.bin"
+    whisper_cli.parent.mkdir(parents=True)
+    whisper_model.parent.mkdir(parents=True)
+    whisper_cli.write_text("#!/bin/sh\n", encoding="utf-8")
+    whisper_model.write_bytes(b"model")
+    monkeypatch.setenv("KCXDOC_WHISPER_CLI", str(whisper_cli))
+    monkeypatch.setenv("KCXDOC_WHISPER_MODEL", str(whisper_model))
+
+    status = module.get_health()
+
+    assert status["tools"]["whisper"]["available"] is True
+    assert status["tools"]["whisper"]["path"] == str(whisper_cli)
+    assert status["tools"]["whisper"]["modelAvailable"] is True
+    assert status["tools"]["whisper"]["modelPath"] == str(whisper_model)
 
 
 def test_frame_review_actions_persist_and_merge_into_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

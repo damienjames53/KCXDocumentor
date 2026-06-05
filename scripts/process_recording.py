@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -26,6 +27,11 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "samples" / "processed"
 DEFAULT_ASSUMED_DURATION_SECONDS = 3600.0
+DEFAULT_WHISPER_CLI = os.environ.get("KCXDOC_WHISPER_CLI", "").strip() or None
+DEFAULT_WHISPER_MODEL = Path(
+    os.environ.get("KCXDOC_WHISPER_MODEL", "").strip()
+    or REPO_ROOT / "models" / "whisper" / "ggml-base.en.bin"
+)
 ACTION_WORDS = {
     "click": "click",
     "select": "select",
@@ -229,14 +235,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--whisper-cli",
-        default=None,
-        help="Path to whisper.cpp CLI. Defaults to whisper-cli on PATH.",
+        default=DEFAULT_WHISPER_CLI,
+        help="Path to whisper.cpp CLI. Defaults to KCXDOC_WHISPER_CLI or whisper-cli on PATH.",
     )
     parser.add_argument(
         "--whisper-model",
         type=Path,
-        default=REPO_ROOT / "models" / "whisper" / "ggml-base.en.bin",
-        help="Path to a local whisper.cpp GGML model.",
+        default=DEFAULT_WHISPER_MODEL,
+        help="Path to a local whisper.cpp GGML model. Defaults to KCXDOC_WHISPER_MODEL or models/whisper/ggml-base.en.bin.",
     )
     parser.add_argument(
         "--whisper-language",

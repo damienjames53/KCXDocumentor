@@ -1,0 +1,15 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+    "ANTHROPIC_API_KEY": "__SET_ME_IN_AZURE_FUNCTION_APP__",
+    "KCXDOC_COSMOS_ENDPOINT": "https://cosmos-kcxdocumentor-dev.documents.azure.com:443/",
+    "KCXDOC_COSMOS_DATABASE": "kcxdocumentor",
+    "KCXDOC_COSMOS_CONTAINER": "aiUsage",
+    "KCXDOC_AUTH_TENANT_ID": "543e31cf-f2b9-457e-88af-82a3938c2913",
+    "KCXDOC_ALLOWED_AUDIENCE": "9d5d6572-b583-4df9-8fe6-8f96c71fad58",
+    "KCXDOC_AUTH_ISSUER": "https://login.microsoftonline.com/543e31cf-f2b9-457e-88af-82a3938c2913/v2.0",
+    "KCXDOC_ENVIRONMENT": "dev"
+  }
+}

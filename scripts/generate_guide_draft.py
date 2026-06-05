@@ -204,7 +204,7 @@ def attach_screenshot_references(draft: dict[str, Any], trace: dict[str, Any]) -
         step["selectedScreenshot"] = screenshot
         step["screenshot"] = screenshot.get("path", "")
         step["screenshotRef"] = screenshot.get("frameId", "")
-        step.setdefault("caption", f"Candidate screenshot at {screenshot.get('timestamp', 'unknown time')}")
+        step.setdefault("caption", f"Workflow screen at {screenshot.get('timestamp', 'unknown time')}")
 
     steps = iter_draft_steps(draft)
     for index, step in enumerate(steps):
@@ -324,10 +324,97 @@ def as_string_list(value: Any) -> list[str]:
 
 
 def generate_with_anthropic(trace: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise SystemExit("ANTHROPIC_API_KEY is required to generate a guide draft.")
+    remote_api_base_url = os.environ.get("KCXDOC_REMOTE_API_BASE_URL", "").strip().rstrip("/")
+    if not remote_api_base_url:
+        raise SystemExit("KCXDOC_REMOTE_API_BASE_URL is required; AI generation must run through the Azure Function proxy.")
+    return generate_with_remote_proxy(trace, args, remote_api_base_url)
 
+
+def generate_with_remote_proxy(trace: dict[str, Any], args: argparse.Namespace, base_url: str) -> dict[str, Any]:
+    bearer_token = os.environ.get("KCXDOC_REMOTE_API_BEARER_TOKEN", "").strip()
+    if not bearer_token:
+        raise SystemExit("KCXDOC_REMOTE_API_BEARER_TOKEN is required when KCXDOC_REMOTE_API_BASE_URL is configured.")
+
+    payload = {
+        "anthropic": build_anthropic_payload(trace, args),
+        "metadata": {
+            "sessionId": trace.get("sessionId", ""),
+            "title": trace_title(trace),
+            "model": args.model,
+            "promptVersion": args.prompt_version,
+        },
+    }
+    req = request.Request(
+        f"{base_url}/api/generate-draft",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {bearer_token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=240) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        report = remote_failure_report(trace, args, exc.code, detail)
+        raise AnthropicDraftError(report["errorMessage"], report) from exc
+    except (TimeoutError, error.URLError, OSError) as exc:
+        report = generation_failure_report(
+            trace=trace,
+            args=args,
+            result={},
+            error_message=f"Remote AI proxy request failed before a complete response was received: {exc}",
+        )
+        raise AnthropicDraftError(report["errorMessage"], report) from exc
+
+    anthropic_result = result.get("anthropicResult") if isinstance(result.get("anthropicResult"), dict) else {}
+    generation_report = result.get("generationReport") if isinstance(result.get("generationReport"), dict) else {}
+    text = extract_text_response(anthropic_result)
+    try:
+        draft = json.loads(text)
+    except json.JSONDecodeError as exc:
+        proxy_report = result.get("generationReport") if isinstance(result.get("generationReport"), dict) else {}
+        report = generation_failure_report(
+            trace=trace,
+            args=args,
+            result=anthropic_result,
+            error_message=f"Remote AI proxy returned invalid guide JSON: {exc}",
+            response_chars=len(text),
+        )
+        if proxy_report:
+            report["generatedAt"] = proxy_report.get("generatedAt") or report["generatedAt"]
+            report["usage"] = proxy_report.get("usage") or report["usage"]
+            report["generationRunId"] = proxy_report.get("generationRunId") or report["generationRunId"]
+            report["model"] = proxy_report.get("model") or report["model"]
+            report["provider"] = proxy_report.get("provider") or report["provider"]
+            report["promptVersion"] = proxy_report.get("promptVersion") or report["promptVersion"]
+        post_remote_usage_record(base_url, bearer_token, report)
+        raise AnthropicDraftError(report.get("errorMessage") or f"Remote AI proxy returned invalid guide JSON: {exc}", report) from exc
+    if isinstance(draft, dict) and isinstance(draft.get("guideDraft"), dict):
+        wrapper_model = draft.get("model") if isinstance(draft.get("model"), dict) else {}
+        draft = draft["guideDraft"]
+        draft.setdefault("model", {}).update(wrapper_model)
+    draft.setdefault("model", {})
+    draft.setdefault("sessionId", trace.get("sessionId", ""))
+    draft.setdefault("generatedAt", generation_report.get("generatedAt") or utc_timestamp())
+    if generation_report.get("generationRunId"):
+        draft["generationRunId"] = generation_report["generationRunId"]
+    draft["model"].update(
+        {
+            "provider": "anthropic",
+            "model": args.model,
+            "mode": "azure-function-proxy",
+            "promptVersion": args.prompt_version,
+        }
+    )
+    draft["usage"] = normalize_anthropic_usage(anthropic_result.get("usage"), args.model)
+    return draft
+
+
+def build_anthropic_payload(trace: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     system_prompt = (WORKSPACE / "prompts" / "guide_draft_system.md").read_text(encoding="utf-8")
     user_prompt = {
         "task": "Create KCXDocumentor guide draft JSON from this procedure trace.",
@@ -335,60 +422,56 @@ def generate_with_anthropic(trace: dict[str, Any], args: argparse.Namespace) -> 
         "today": date.today().isoformat(),
         "procedureTrace": prepare_trace_for_anthropic(trace),
     }
-    payload = {
+    return {
         "model": args.model,
         "max_tokens": args.max_tokens,
         "temperature": args.temperature,
         "system": system_prompt,
         "messages": [{"role": "user", "content": json.dumps(user_prompt, separators=(",", ":"))}],
     }
+
+
+def remote_failure_report(trace: dict[str, Any], args: argparse.Namespace, status_code: int, detail: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(detail)
+    except json.JSONDecodeError:
+        payload = {}
+    report = payload.get("generationReport") if isinstance(payload.get("generationReport"), dict) else {}
+    if report:
+        return report
+    message = payload.get("error") or detail.strip() or f"HTTP {status_code}"
+    return generation_failure_report(
+        trace=trace,
+        args=args,
+        result={},
+        error_message=f"Remote AI proxy request failed: HTTP {status_code}: {message}",
+        response_chars=len(detail),
+    )
+
+
+def post_remote_usage_record(base_url: str, bearer_token: str, report: dict[str, Any]) -> None:
     req = request.Request(
-        ANTHROPIC_MESSAGES_URL,
-        data=json.dumps(payload).encode("utf-8"),
+        f"{base_url}/api/usage-records",
+        data=json.dumps({"records": [report]}).encode("utf-8"),
         headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {bearer_token}",
             "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
         },
         method="POST",
     )
     try:
-        with request.urlopen(req, timeout=180) as response:
-            result = json.loads(response.read().decode("utf-8"))
-    except error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise SystemExit(f"Anthropic API request failed: HTTP {exc.code}: {detail}") from exc
+        with request.urlopen(req, timeout=30):
+            return
+    except (TimeoutError, error.HTTPError, error.URLError, OSError) as exc:
+        report["remoteUsageUpdateError"] = str(exc)
 
-    text = extract_text_response(result)
-    try:
-        draft = json.loads(text)
-    except json.JSONDecodeError as exc:
-        report = generation_failure_report(
-            trace=trace,
-            args=args,
-            result=result,
-            error_message=f"Anthropic returned invalid guide JSON: {exc}",
-            response_chars=len(text),
-        )
-        upsert_usage_record(report)
-        raise AnthropicDraftError(report["errorMessage"], report) from exc
-    if isinstance(draft, dict) and isinstance(draft.get("guideDraft"), dict):
-        wrapper_model = draft.get("model") if isinstance(draft.get("model"), dict) else {}
-        draft = draft["guideDraft"]
-        draft.setdefault("model", {}).update(wrapper_model)
-    draft.setdefault("model", {})
-    draft.setdefault("sessionId", trace.get("sessionId", ""))
-    draft.setdefault("generatedAt", utc_timestamp())
-    draft["model"].update(
-        {
-            "provider": "anthropic",
-            "model": args.model,
-            "mode": "messages-api",
-            "promptVersion": args.prompt_version,
-        }
-    )
-    draft["usage"] = normalize_anthropic_usage(result.get("usage"), args.model)
-    return draft
+
+def trace_title(trace: dict[str, Any]) -> str:
+    recording = trace.get("recording") if isinstance(trace.get("recording"), dict) else {}
+    target = str(recording.get("targetApplication") or "").strip()
+    source = str(recording.get("sourceName") or recording.get("sourceFile") or "").strip()
+    return " - ".join(part for part in (target, source) if part)
 
 
 def utc_timestamp() -> str:
@@ -417,6 +500,22 @@ def estimate_anthropic_cost_usd(input_tokens: int, output_tokens: int, model: st
     )
 
 
+def anthropic_http_error_message(status_code: int, detail: str) -> str:
+    detail = detail.strip()
+    if not detail:
+        return f"Anthropic API request failed: HTTP {status_code}."
+    try:
+        payload = json.loads(detail)
+    except json.JSONDecodeError:
+        return f"Anthropic API request failed: HTTP {status_code}: {detail}"
+    error_payload = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+    message = str(error_payload.get("message") or payload.get("message") or detail).strip()
+    error_type = str(error_payload.get("type") or payload.get("type") or "").strip()
+    if error_type:
+        return f"Anthropic API request failed: HTTP {status_code} ({error_type}): {message}"
+    return f"Anthropic API request failed: HTTP {status_code}: {message}"
+
+
 def generation_report_from_draft(draft: dict[str, Any]) -> dict[str, Any]:
     model = draft.get("model") if isinstance(draft.get("model"), dict) else {}
     report = {
@@ -430,7 +529,7 @@ def generation_report_from_draft(draft: dict[str, Any]) -> dict[str, Any]:
         "promptVersion": model.get("promptVersion", ""),
         "usage": draft.get("usage", {}),
     }
-    report["generationRunId"] = generation_run_id(report)
+    report["generationRunId"] = str(draft.get("generationRunId") or generation_run_id(report))
     return report
 
 
@@ -488,7 +587,6 @@ def write_generation_report(draft_path: Path, draft: dict[str, Any]) -> Path:
         json.dumps(report, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    upsert_usage_record(report)
     return report_path
 
 
@@ -515,9 +613,9 @@ def upsert_usage_record(report: dict[str, Any], db_path: Path | None = None) -> 
             INSERT INTO generation_usage (
                 generation_run_id, generated_at, recorded_at, session_id, title,
                 provider, model, prompt_version, input_tokens, output_tokens,
-                total_tokens, estimated_cost_usd, status, error_message, report_json
+                total_tokens, estimated_cost_usd, page_count, status, error_message, report_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(generation_run_id) DO UPDATE SET
                 generated_at = excluded.generated_at,
                 recorded_at = excluded.recorded_at,
@@ -530,6 +628,7 @@ def upsert_usage_record(report: dict[str, Any], db_path: Path | None = None) -> 
                 output_tokens = excluded.output_tokens,
                 total_tokens = excluded.total_tokens,
                 estimated_cost_usd = excluded.estimated_cost_usd,
+                page_count = COALESCE(NULLIF(generation_usage.page_count, 0), excluded.page_count),
                 status = excluded.status,
                 error_message = excluded.error_message,
                 report_json = excluded.report_json
@@ -547,6 +646,7 @@ def upsert_usage_record(report: dict[str, Any], db_path: Path | None = None) -> 
                 int(usage.get("outputTokens") or usage.get("output_tokens") or 0),
                 int(usage.get("totalTokens") or usage.get("total_tokens") or 0),
                 float(usage.get("estimatedCostUSD") or usage.get("estimated_cost_usd") or 0),
+                int(report.get("pageCount") or report.get("page_count") or 0),
                 status,
                 str(report.get("errorMessage") or ""),
                 json.dumps(report, sort_keys=True),
@@ -571,6 +671,7 @@ def ensure_usage_schema(connection: sqlite3.Connection) -> None:
             output_tokens INTEGER NOT NULL DEFAULT 0,
             total_tokens INTEGER NOT NULL DEFAULT 0,
             estimated_cost_usd REAL NOT NULL DEFAULT 0,
+            page_count INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'succeeded',
             error_message TEXT NOT NULL DEFAULT '',
             report_json TEXT NOT NULL
@@ -585,6 +686,8 @@ def ensure_usage_schema(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE generation_usage ADD COLUMN status TEXT NOT NULL DEFAULT 'succeeded'")
     if "error_message" not in existing_columns:
         connection.execute("ALTER TABLE generation_usage ADD COLUMN error_message TEXT NOT NULL DEFAULT ''")
+    if "page_count" not in existing_columns:
+        connection.execute("ALTER TABLE generation_usage ADD COLUMN page_count INTEGER NOT NULL DEFAULT 0")
 
 
 def prepare_trace_for_anthropic(trace: dict[str, Any]) -> dict[str, Any]:

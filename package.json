@@ -18,5 +18,8 @@
     "blink:qa:sidecar": ".venv/bin/python scripts/qa_document_artifacts.py artifacts/generated/blink-rx-part-2-sidecar/user_guide.anthropic.docx --json",
     "blink:compare:stt": ".venv/bin/python scripts/compare_transcripts.py samples/processed/blink-rx-part-2-sidecar/transcript.json samples/processed/blink-rx-part-2-whisper/transcript.json --output artifacts/qa/blink-rx-part-2-stt-comparison.json",
     "app:start": ".venv/bin/python scripts/app_server.py --host 127.0.0.1 --port 8765"
+  },
+  "dependencies": {
+    "@azure/msal-browser": "^5.11.0"
   }
 }

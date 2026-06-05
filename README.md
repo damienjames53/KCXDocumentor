@@ -68,6 +68,43 @@ Start the local browser console:
 
 Then open `http://127.0.0.1:8765`.
 
+The local console is protected with Microsoft Entra MSAL + PKCE. The current local app registration settings live in ignored `.env` keys:
+
+```text
+KCXDOC_AUTH_ENABLED=true
+KCXDOC_AUTH_TENANT_ID=543e31cf-f2b9-457e-88af-82a3938c2913
+KCXDOC_AUTH_CLIENT_ID=9d5d6572-b583-4df9-8fe6-8f96c71fad58
+KCXDOC_AUTH_REDIRECT_URI=http://127.0.0.1:8765/
+```
+
+Use **Logout** in the header to end the MSAL session and clear the local protected-media session.
+
 The app lists recordings from `samples/raw/`, processes a selected recording into `samples/processed/`, generates Anthropic guide drafts, builds DOCX files, and runs DOCX QA checks.
 
 For step-by-step operator instructions, see `docs/user-guide.md`.
+
+## Dockerized Local App
+
+The app can also run in Docker while keeping recordings and generated files on the host filesystem:
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+Then open `http://127.0.0.1:8765`.
+
+The image does not bundle Whisper at build time. By default the container bootstraps latest `whisper.cpp` into the mounted Whisper share at first startup, then reuses that folder:
+
+```text
+KCXDOC_HOST_RAW_DIR=C:\KCXDocumentor\samples\raw
+KCXDOC_HOST_PROCESSED_DIR=C:\KCXDocumentor\samples\processed
+KCXDOC_HOST_ARTIFACTS_DIR=C:\KCXDocumentor\artifacts
+KCXDOC_HOST_WHISPER_DIR=C:\KCXDocumentor\external\whisper
+KCXDOC_BOOTSTRAP_WHISPER=true
+KCXDOC_WHISPER_UPDATE=latest
+```
+
+The browser URL remains `http://127.0.0.1:8765`; Docker maps the container's internal `8765` port to the same host port. Use `docker compose ps` and `docker compose logs -f kcxdocumentor` for status.
+
+See `docs/containerization.md` for runtime Whisper bootstrap behavior, offline/preseeded options, health-check output, and macOS path examples.

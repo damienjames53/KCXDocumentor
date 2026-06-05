@@ -1,0 +1,18 @@
+{
+  "name": "kcxdocumentor-ai-functions",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/functions.js",
+  "scripts": {
+    "start": "func start",
+    "test:syntax": "node --check src/functions.js"
+  },
+  "dependencies": {
+    "@azure/cosmos": "^4.5.0",
+    "@azure/functions": "^4.8.0",
+    "@azure/identity": "^4.13.0",
+    "jose": "^6.1.3"
+  },
+  "devDependencies": {}
+}

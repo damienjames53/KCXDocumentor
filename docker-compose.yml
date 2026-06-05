@@ -1,0 +1,25 @@
+services:
+  kcxdocumentor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: kcxdocumentor:dev
+    container_name: kcxdocumentor-dev
+    env_file:
+      - .env
+    environment:
+      KCXDOC_AUTH_REDIRECT_URI: http://127.0.0.1:8765/
+      KCXDOC_AUTH_POST_LOGOUT_REDIRECT_URI: http://127.0.0.1:8765/
+      KCXDOC_BOOTSTRAP_WHISPER: ${KCXDOC_BOOTSTRAP_WHISPER:-true}
+      KCXDOC_WHISPER_UPDATE: ${KCXDOC_WHISPER_UPDATE:-latest}
+      KCXDOC_WHISPER_ROOT: /opt/kcxdocumentor/external/whisper
+      KCXDOC_WHISPER_CLI: /opt/kcxdocumentor/external/whisper/bin/whisper-cli
+      KCXDOC_WHISPER_MODEL: /opt/kcxdocumentor/external/whisper/models/ggml-base.en.bin
+    ports:
+      - "8765:8765"
+    volumes:
+      - ${KCXDOC_HOST_RAW_DIR:-./samples/raw}:/app/samples/raw
+      - ${KCXDOC_HOST_PROCESSED_DIR:-./samples/processed}:/app/samples/processed
+      - ${KCXDOC_HOST_ARTIFACTS_DIR:-./artifacts}:/app/artifacts
+      - ${KCXDOC_HOST_WHISPER_DIR:-./external/whisper}:/opt/kcxdocumentor/external/whisper
+    restart: unless-stopped
