@@ -25,6 +25,39 @@ The MVP consumes pre-recorded files rather than recording the screen itself.
 
 The initial testing surface is a local web console served by the Python stdlib app server. This is a prototype and review surface, not the final product shell. If KCXDocumentor becomes a full web client, thick Windows client, or hybrid desktop app, its visual language should continue to follow the `KCXUIComponents` reference standard.
 
+## Local Desktop Trust Boundary
+
+KCXDocumentor is currently designed as a desktop-local workstation utility with a browser UI, not as a shared web application.
+
+Local workstation endpoints are allowed to operate without Entra bearer-token validation because they only read or write files already mapped to the user's local workstation:
+
+- Recording and transcript import.
+- Local recording processing.
+- Session listing and session detail.
+- Candidate frame thumbnails and inspection images.
+- Session video preview.
+- Frame review decisions and manual frame extraction.
+- Local QA.
+- Generated artifact download.
+
+Cloud-backed endpoints remain Entra-authenticated because they leave the workstation or update centralized reporting:
+
+- AI guide draft generation through the Azure Function proxy.
+- AI Spend summary reads from Cosmos DB.
+- AI usage writes.
+- Page-count reporting when performed as a cloud reporting update.
+- Any future remote persistence or shared reporting API.
+
+This split intentionally reduces stale-token breakpoints in the desktop workflow. A user should be able to import, process, review screenshots, build the local DOCX, run local QA, and download local files even if their cloud token is expired. Token acquisition should only be required when the app creates an AI guide or reads/writes centralized AI Spend data.
+
+Security controls for this local-trust model:
+
+- Docker must publish the browser port only to `127.0.0.1`.
+- The local server must keep path traversal protections, safe filename validation, and session-id validation.
+- Anthropic API keys must remain server-side in Azure Functions, never in the local browser or local `.env`.
+- AI/Cosmos calls must continue to require a valid Entra token validated by the Azure Function.
+- KCXDocumentor should not be deployed as a multi-user web server without reintroducing full server-side authorization for local artifact endpoints.
+
 ## Recommended Stack
 
 | Layer | Recommendation | Reason |
@@ -91,6 +124,8 @@ Source and artifact folders must remain host-mappable:
 - `artifacts` maps to a local generated-output folder.
 
 This keeps large media, generated DOCX files, QA output, and local processing artifacts outside the image and available to the user on Windows and macOS. The Azure Function remains responsible for the Anthropic proxy and persisted AI Spend data.
+
+Compose must bind the app port as `127.0.0.1:8765:8765`. Binding to `0.0.0.0` would expose local recordings, screenshots, generated documents, and local processing controls to the workstation's network, which does not match the desktop-local trust model.
 
 ## Compact Procedure Trace
 

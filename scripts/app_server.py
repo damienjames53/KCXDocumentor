@@ -43,7 +43,11 @@ DEFAULT_AUTH_CLIENT_ID = "9d5d6572-b583-4df9-8fe6-8f96c71fad58"
 DEFAULT_AUTH_TENANT_ID = "543e31cf-f2b9-457e-88af-82a3938c2913"
 DEFAULT_AUTH_AUTHORITY = f"https://login.microsoftonline.com/{DEFAULT_AUTH_TENANT_ID}"
 DEFAULT_AUTH_SCOPES = "openid profile"
-PUBLIC_API_PATHS = {"/api/auth-config", "/api/auth-session", "/api/logout", "/api/health"}
+CLOUD_AUTH_API_PATHS = {
+    "/api/usage-summary",
+    "/api/generate-draft",
+    "/api/migrate-usage",
+}
 AUTH_SESSION_COOKIE = "KCXDocumentorAuth"
 AUTH_SESSION_SECRET = ""
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -233,11 +237,7 @@ class KCXDocumentorHandler(BaseHTTPRequestHandler):
         return payload
 
     def require_api_auth(self, path: str) -> None:
-        if not path.startswith("/api/") or path in PUBLIC_API_PATHS:
-            return
-        if not get_auth_config().get("enabled"):
-            return
-        if validate_auth_session_cookie(self.headers.get("Cookie", "")):
+        if path not in CLOUD_AUTH_API_PATHS or not get_auth_config().get("enabled"):
             return
         authorization = self.headers.get("Authorization", "")
         if not authorization.startswith("Bearer "):
@@ -644,8 +644,10 @@ def build_docx(body: dict[str, Any], bearer_token: str = "") -> dict[str, Any]:
         page_count = estimate_docx_page_count(output)
         response["pageCount"] = page_count
         generation_report = read_json_if_exists(draft_path.parent / "generation_report.json")
-        if remote_api_base_url() and generation_report:
+        if remote_api_base_url() and generation_report and bearer_token:
             response["usageUpdate"] = update_remote_usage_page_count(generation_report, page_count, bearer_token=bearer_token)
+        elif remote_api_base_url() and generation_report:
+            response["usageUpdateSkipped"] = "Page count reporting requires an authenticated cloud request and does not block local DOCX creation."
     return response
 
 

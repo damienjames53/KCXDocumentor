@@ -7,6 +7,10 @@ KCXDocumentor can run as a local Docker container while keeping recordings, proc
 - The image includes the Python app, static web console, document tooling, FFmpeg, Tesseract, and build tools needed to compile `whisper.cpp`.
 - The image does **not** include `whisper-cli` or Whisper model files at build time.
 - At container startup, the entrypoint can fetch the latest `whisper.cpp` release source, build `whisper-cli`, and download the configured model into the mounted Whisper share.
+- The app is intended to run as a desktop-local utility. Docker Compose publishes the app to `127.0.0.1:8765` only.
+- Local artifact endpoints serve workstation-local recordings, thumbnails, videos, generated DOCX files, and QA outputs without Entra bearer-token validation.
+- Cloud-backed endpoints still require Entra tokens: AI guide generation through the Azure Function proxy and AI Spend reads/writes in Cosmos DB.
+- DOCX creation is local. Cloud page-count reporting must not block the local DOCX build or download path.
 - Host folders are mounted into the container:
   - `samples/raw` -> `/app/samples/raw`
   - `samples/processed` -> `/app/samples/processed`
@@ -140,8 +144,10 @@ docker compose ps
 Expected service mapping:
 
 ```text
-0.0.0.0:8765->8765/tcp
+127.0.0.1:8765->8765/tcp
 ```
+
+If Compose shows `0.0.0.0:8765->8765/tcp`, update `docker-compose.yml` before using the app with real recordings. Binding to all interfaces can expose local videos, screenshots, and generated documents to the local network.
 
 Do not run the Docker socket path as a command. This is an internal Docker API file:
 
@@ -155,6 +161,8 @@ If Compose reports that this socket is missing, Docker Desktop is not running or
 
 - The app still uses the Azure Function proxy for Anthropic and AI Spend.
 - The browser redirect URI remains `http://127.0.0.1:8765/`.
+- Local imports, processing, frame review, thumbnails, video preview, DOCX creation, QA, and artifact download are local-trust operations.
+- Expired Entra tokens should only interrupt AI creation and AI Spend reporting, not local review or download work.
 - Generated DOCX files are written to the mounted artifacts folder.
 - AI usage reporting persists in Cosmos DB and is not lost when local artifacts are deleted.
 - Whisper binaries and models persist in the mounted Whisper folder, so rebuilding the KCXDocumentor image does not force a new Whisper download.

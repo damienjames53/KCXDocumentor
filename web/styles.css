@@ -244,11 +244,6 @@ label span {
   gap: 6px;
 }
 
-body.auth-required .main-nav,
-body.auth-required .status-strip {
-  display: none;
-}
-
 .main-nav-button {
   min-height: 34px;
   border-color: transparent;

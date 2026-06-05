@@ -245,11 +245,7 @@ const HELP_TOPICS = [
 document.addEventListener("DOMContentLoaded", async () => {
   bindEvents();
   await initializeAuth();
-  if (isAuthenticated()) {
-    refreshAll();
-  } else {
-    renderAll();
-  }
+  refreshAll();
 });
 
 function bindEvents() {
@@ -505,7 +501,7 @@ async function loadUsageSummary(options = {}) {
   state.usage.error = "";
   renderUsage();
   try {
-    const summary = await apiGet(`/api/usage-summary?range=${encodeURIComponent(range)}`);
+    const summary = await cloudApiGet(`/api/usage-summary?range=${encodeURIComponent(range)}`);
     state.usage.summary = normalizeUsageSummary(summary, range);
   } catch (error) {
     state.usage.summary = null;
@@ -523,7 +519,7 @@ async function loadCurrentMonthSpend(options = {}) {
   state.usage.currentMonthLoading = true;
   renderGlobalUsage();
   try {
-    const summary = await apiGet("/api/usage-summary?range=month");
+    const summary = await cloudApiGet("/api/usage-summary?range=month");
     state.usage.currentMonthSummary = normalizeUsageSummary(summary, "month");
   } catch (error) {
     state.usage.currentMonthSummary = null;
@@ -638,7 +634,7 @@ async function generateDraft() {
   setBusy(true);
   try {
     setOperation("Reading the walkthrough and building the guide structure...", AI_CREATE_MESSAGES);
-    const draftResult = await apiPost("/api/generate-draft", { sessionId });
+    const draftResult = await cloudApiPost("/api/generate-draft", { sessionId });
     assertCommandSucceeded(draftResult, "AI draft generation");
     logActivity("Anthropic draft generated.");
     state.session = mergeSessionResult(state.session, draftResult);
@@ -741,7 +737,7 @@ async function saveDocxArtifact(artifact) {
   const suggestedName = downloadNameForArtifact(artifact);
   if (window.showSaveFilePicker) {
     try {
-      const response = await fetch(downloadUrl, { headers: await authHeaders() });
+      const response = await fetch(downloadUrl);
       if (!response.ok) {
         throw new Error(`Download failed with HTTP ${response.status}`);
       }
@@ -897,11 +893,28 @@ function requireSessionId() {
 }
 
 async function apiGet(path) {
+  const response = await fetch(path, { headers: { Accept: "application/json" } });
+  return parseApiResponse(response);
+}
+
+async function cloudApiGet(path) {
   const response = await fetch(path, { headers: await authHeaders({ Accept: "application/json" }) });
   return parseApiResponse(response);
 }
 
 async function apiPost(path, payload) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  return parseApiResponse(response);
+}
+
+async function cloudApiPost(path, payload) {
   const response = await fetch(path, {
     method: "POST",
     headers: await authHeaders({
@@ -916,7 +929,7 @@ async function apiPost(path, payload) {
 async function apiPostForm(path, formData) {
   const response = await fetch(path, {
     method: "POST",
-    headers: await authHeaders({ Accept: "application/json" }),
+    headers: { Accept: "application/json" },
     body: formData,
   });
   return parseApiResponse(response);
@@ -1218,8 +1231,8 @@ function renderAuth() {
   const enabled = state.auth.config?.enabled !== false;
   const authenticated = isAuthenticated();
   const loading = state.auth.loading;
-  document.body.classList.toggle("auth-required", enabled && !authenticated);
-  els.authGate.hidden = !enabled || authenticated;
+  document.body.classList.toggle("auth-required", false);
+  els.authGate.hidden = !enabled || authenticated || state.activePage !== "usage";
   els.authUserPanel.hidden = !enabled || !authenticated;
   els.loginButton.disabled = loading || state.busy;
   els.logoutButton.disabled = loading || state.busy;
@@ -1229,7 +1242,7 @@ function renderAuth() {
   } else if (state.auth.error) {
     els.authStatusText.textContent = state.auth.error;
   } else {
-    els.authStatusText.textContent = "Use your Microsoft account to access recording processing, guide generation, and AI spend reporting.";
+    els.authStatusText.textContent = "Local processing is available on this workstation. Sign in is required for AI guide creation and AI Spend reporting.";
   }
 
   const account = state.auth.account;
@@ -1238,21 +1251,17 @@ function renderAuth() {
 
 function setActivePage(page) {
   state.activePage = page === "usage" ? "usage" : "workspace";
+  renderAuth();
   renderPages();
-  if (state.activePage === "usage" && !state.usage.loading) {
+  if (state.activePage === "usage" && isAuthenticated() && !state.usage.loading) {
     loadUsageSummary();
   }
 }
 
 function renderPages() {
-  if (!isAuthenticated()) {
-    els.workspacePage.hidden = true;
-    els.usagePage.hidden = true;
-    return;
-  }
   const usageActive = state.activePage === "usage";
   els.workspacePage.hidden = usageActive;
-  els.usagePage.hidden = !usageActive;
+  els.usagePage.hidden = !usageActive || !isAuthenticated();
   document.querySelectorAll("[data-page]").forEach((button) => {
     button.classList.toggle("active", button.dataset.page === state.activePage);
   });
@@ -2530,28 +2539,10 @@ function renderOperationStatus() {
 }
 
 function updateActionAvailability() {
-  if (!isAuthenticated()) {
-    [
-      els.refreshAll,
-      els.importRecordingButton,
-      els.importTranscriptButton,
-      els.processButton,
-      els.generateDraftButton,
-      els.buildDocxButton,
-      els.qaDocxButton,
-      els.reloadSession,
-      els.clearSession,
-      els.addFrameButton,
-      els.addFrameTimestampButton,
-      els.useVideoTimeButton,
-    ].forEach((button) => {
-      if (button) button.disabled = true;
-    });
-    return;
-  }
   const hasRecording = Boolean(els.recordingSelect.value);
   const hasSession = Boolean(state.selectedSessionId || els.sessionIdInput.value.trim());
   const hasLoadedSession = Boolean(state.session);
+  const cloudReady = isAuthenticated();
   const artifacts = getArtifacts();
   const hasDocx = artifacts.some((artifact) => /user_guide.*\.docx$/i.test(artifact.name || artifact.path || ""));
 
@@ -2559,7 +2550,7 @@ function updateActionAvailability() {
   els.importRecordingButton.disabled = state.busy;
   els.importTranscriptButton.disabled = state.busy;
   els.processButton.disabled = state.busy || !hasRecording;
-  els.generateDraftButton.disabled = state.busy || !hasSession;
+  els.generateDraftButton.disabled = state.busy || !hasSession || !cloudReady;
   els.buildDocxButton.disabled = state.busy || !hasDocx;
   els.qaDocxButton.disabled = state.busy || !hasSession || !hasDocx;
   els.reloadSession.disabled = state.busy || !hasSession;
@@ -2572,7 +2563,9 @@ function updateActionAvailability() {
   els.useVideoTimeButton.disabled = state.busy || !hasLoadedSession;
 
   els.processButton.title = hasRecording ? "Process the selected recording into a local trace." : "Select a recording first.";
-  els.generateDraftButton.title = hasSession ? "Create the AI guide, build the DOCX, and run local QA." : "Select or process a session first.";
+  els.generateDraftButton.title = !cloudReady
+    ? "Sign in with Microsoft to create an AI guide."
+    : hasSession ? "Create the AI guide, build the DOCX, and run local QA." : "Select or process a session first.";
   els.buildDocxButton.title = hasDocx ? "Download the latest generated DOCX." : "Create a guide first.";
   els.qaDocxButton.title = hasDocx ? "Re-run local QA checks without using AI tokens." : "Create a guide first.";
 }

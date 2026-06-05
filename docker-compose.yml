@@ -16,7 +16,7 @@ services:
       KCXDOC_WHISPER_CLI: /opt/kcxdocumentor/external/whisper/bin/whisper-cli
       KCXDOC_WHISPER_MODEL: /opt/kcxdocumentor/external/whisper/models/ggml-base.en.bin
     ports:
-      - "8765:8765"
+      - "127.0.0.1:8765:8765"
     volumes:
       - ${KCXDOC_HOST_RAW_DIR:-./samples/raw}:/app/samples/raw
       - ${KCXDOC_HOST_PROCESSED_DIR:-./samples/processed}:/app/samples/processed
