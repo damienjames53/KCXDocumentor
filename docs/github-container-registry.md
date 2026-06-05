@@ -14,7 +14,7 @@ The publishing workflow is:
 
 ## Visibility
 
-The repository is public, but the container package should remain private. The workflow pushes the image with `packages: write` and then patches the GHCR package visibility to `private`.
+The repository is public, but the container package should remain private. GitHub's Container Registry documentation states that the first publish of a package defaults to private visibility. The workflow pushes the image with `packages: write`; do not change the package visibility to public in GitHub package settings.
 
 ## Pull Access
 
