@@ -40,7 +40,9 @@ The prototype supports the initial documentation workflow:
 - Import screen recordings and optional transcript files.
 - Process recordings locally into trace data and candidate screenshots.
 - Use source profiles such as Teams Recording to reduce overlay-heavy frame selection.
+- Review screenshots grouped as Recommended, Alternates, and Needs Attention.
 - Approve, reject, or manually capture candidate screenshots from the video.
+- Run local OCR and evidence scoring on manually captured frames so selected images carry context into guide generation.
 - Generate a structured guide through the authenticated AI proxy.
 - Build and download a DOCX guide.
 - Run local QA checks.
@@ -99,7 +101,8 @@ Pilot validation should compare generated guides against manual documentation fo
 
 | Risk | Mitigation |
 |---|---|
-| Teams overlays pollute screenshots | Source profile, frame rejection, and manual frame capture |
+| Teams overlays pollute screenshots | Source profile, Needs Attention grouping, frame rejection, and manual frame capture |
+| Manual screenshots lack context | Added frames run local OCR/evidence scoring and are mapped to the selected segment |
 | AI output includes internal language | Prompt rules, DOCX QA checks, and reviewer inspection |
 | Poor audio quality weakens transcript | Optional Teams transcript import and local Whisper fallback |
 | Users think processing is stuck | UI progress states for recording processing and guide creation |

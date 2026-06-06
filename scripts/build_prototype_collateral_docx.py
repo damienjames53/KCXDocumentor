@@ -20,7 +20,8 @@ OUT_DIR = WORKSPACE / "docs" / "prototype-collateral"
 BRAND_IMAGES = WORKSPACE / "assets" / "branding" / "images"
 BRAND_TEMPLATES = WORKSPACE / "assets" / "branding" / "templates"
 PPT_TEMPLATE = BRAND_TEMPLATES / "Keycentrix Powerpoint Template - Internal and Support 1.pptx"
-SAMPLE_GUIDE = WORKSPACE / "artifacts" / "generated" / "blink-rx-training-part-1-112125-4eba47fa6aa0" / "user_guide.anthropic.docx"
+SAMPLE_GUIDE = WORKSPACE / "artifacts" / "generated" / "newleaf-rx-visual-guide-fresh" / "user_guide.anthropic.docx"
+SAMPLE_GUIDE_TITLE = "KCXDocumentor - Sample Generated Visual Guide - Newleaf Rx"
 
 PRIMARY = RGBColor(0x1C, 0x75, 0xBC)
 GREEN = RGBColor(0x8C, 0xC6, 0x3F)
@@ -225,7 +226,7 @@ def _cover(doc: Document, spec: DocSpec) -> None:
     _callout(
         doc,
         "Recipe alignment",
-        "Built as a keycentrix internal artifact using the DamienDev document recipe structure: control metadata, version history, purpose, scope, audience, governance, process detail, and appendices.",
+        "Built as a keycentrix internal artifact using the KCX document standard: control metadata, version history, purpose, scope, audience, governance, process detail, and appendices.",
         fill="EAF3FB",
     )
 
@@ -239,7 +240,7 @@ def _cover(doc: Document, spec: DocSpec) -> None:
             ["Status", spec.status],
             ["Owner", spec.owner],
             ["Audience", spec.audience],
-            ["Build Standard", "DamienDev document recipe"],
+            ["Build Standard", "KCX document standard"],
         ],
         [2.0, 4.8],
     )
@@ -251,7 +252,7 @@ def _build_doc(spec: DocSpec) -> Path:
     doc.core_properties.title = spec.title
     doc.core_properties.author = "keycentrix"
     doc.core_properties.subject = spec.subtitle
-    doc.core_properties.comments = "Built with the DamienDev document recipe pattern."
+    doc.core_properties.comments = "Built with the KCX document standard."
     _style_document(doc)
     _header_footer(doc, spec.title)
     _cover(doc, spec)
@@ -270,7 +271,7 @@ def _build_doc(spec: DocSpec) -> Path:
     )
 
     doc.add_heading("Version History", level=1)
-    _table(doc, ["Version", "Date", "Summary"], [["1.0", date.today().isoformat(), "Initial collateral package aligned to the DamienDev document recipe."]])
+    _table(doc, ["Version", "Date", "Summary"], [["1.0", date.today().isoformat(), "Initial collateral package aligned to the KCX document standard."]])
 
     doc.add_heading("Purpose", level=1)
     doc.add_paragraph(spec.purpose)
@@ -330,7 +331,9 @@ def _doc_specs() -> list[DocSpec]:
                 ("Current Capability", [
                     "Imports recordings and optional transcripts through the local web console.",
                     "Processes video, audio, transcript, OCR, and candidate frames locally.",
-                    "Lets reviewers approve, reject, or capture screenshots before guide creation.",
+                    "Groups screenshots as Recommended, Alternates, and Needs Attention before guide creation.",
+                    "Lets reviewers approve, reject, or capture screenshots from the video picker.",
+                    "Runs OCR and evidence scoring on reviewer-added frames so they carry segment context into guide generation.",
                     "Creates a DOCX guide through an authenticated Azure Function proxy to Anthropic.",
                     "Persists AI Spend in Cosmos DB by user, document, token count, page count, and estimated cost.",
                 ]),
@@ -346,6 +349,7 @@ def _doc_specs() -> list[DocSpec]:
                     "Time to first usable draft compared with manual documentation.",
                     "Reviewer edits required before a guide can be shared.",
                     "Screenshot relevance and step alignment.",
+                    "Accuracy of OCR/context captured from manually added frames.",
                     "Absence of internal AI, prompt, or pipeline language in the reader-facing document.",
                     "Cost per guide and cost per generated page.",
                 ]),
@@ -378,6 +382,7 @@ def _doc_specs() -> list[DocSpec]:
                     "Use a real source recording and show the import process.",
                     "State that raw video stays local while compact reviewed context is sent through the authenticated AI route.",
                     "Show frame approval and rejection because it is the primary quality gate.",
+                    "Show Add from Video and explain that manually added frames run local OCR and map to the selected segment.",
                     "Close with the validation ask for trainers and business analysts.",
                 ]),
                 ("Storyboard", [
@@ -385,7 +390,8 @@ def _doc_specs() -> list[DocSpec]:
                     ["Opening", "KCXDocumentor workspace", "Recorded walkthroughs should not require hours of manual documentation work."],
                     ["Import", "Recording and transcript import controls", "A reviewer imports the source recording and optional transcript."],
                     ["Process", "Processing progress state", "Local media processing creates trace data and candidate screenshots."],
-                    ["Review", "Frame reviewer", "The reviewer rejects overlays and captures better screenshots when needed."],
+                    ["Review", "Frame reviewer", "Recommended, Alternates, and Needs Attention frames make screenshot review explicit."],
+                    ["Add Frame", "Video picker", "The reviewer captures a missing screenshot; OCR and segment context are added locally."],
                     ["Create Guide", "AI creation progress", "Compact reviewed context is sent through the authenticated proxy."],
                     ["Download", "Download DOCX", "The result is a Word guide ready for human review."],
                     ["AI Spend", "AI Spend page", "Leadership can see documents, tokens, pages, costs, and user attribution."],
@@ -435,6 +441,7 @@ def _doc_specs() -> list[DocSpec]:
                     "Choose Teams Recording when the video includes Teams overlays.",
                     "Process the recording and wait for the processing progress indicator to finish.",
                     "Review screenshots, reject irrelevant frames, and add better frames from the video when needed.",
+                    "Confirm manually added frames are assigned to the right segment before creating the guide.",
                     "Choose Create Guide and wait for the AI creation progress indicator to complete.",
                     "Download the generated DOCX and review it before sharing.",
                 ]),
@@ -583,7 +590,7 @@ def _build_deck() -> Path:
     if title_slide.shapes.title:
         title_slide.shapes.title.text = "KCXDocumentor"
     add_text(title_slide, "Turning workflow recordings into reviewable user guides", 3.45, 4.82, 7.2, 0.42, size=15, color="gray3", align=PP_ALIGN.CENTER)
-    add_text(title_slide, "Built with the DamienDev presentation recipe pattern", 3.45, 5.28, 7.2, 0.30, size=10.5, color="gray3", align=PP_ALIGN.CENTER)
+    add_text(title_slide, "Built with the KCX presentation standard", 3.45, 5.28, 7.2, 0.30, size=10.5, color="gray3", align=PP_ALIGN.CENTER)
 
     slides = [
         ("The Documentation Bottleneck", "BA, trainer, and implementation teams already capture useful walkthroughs.", [
@@ -592,10 +599,10 @@ def _build_deck() -> Path:
         ]),
         ("What KCXDocumentor Changes", "The tool turns local recordings into reviewable DOCX guides.", [
             ("Guided workflow", ["Import recording and transcript", "Process locally", "Review screenshots", "Create and download DOCX"]),
-            ("Quality gate", ["Rejected frames are excluded", "Reviewer notes travel into generation context", "Comments identify areas needing validation"]),
+            ("Quality gate", ["Needs Attention frames are visible", "Rejected frames are excluded", "Reviewer notes travel into generation context"]),
         ]),
         ("Local-First AI Boundary", "Raw video remains on the workstation.", [
-            ("Local processing", ["FFmpeg, Whisper, OCR, and frame extraction run locally", "Artifacts stay in mapped workstation folders"]),
+            ("Local processing", ["FFmpeg, Whisper, OCR, and frame extraction run locally", "Added video frames are OCR-enriched locally", "Artifacts stay in mapped workstation folders"]),
             ("AI payload", ["Compact transcript and metadata", "Reviewer-approved screenshots and notes", "No raw video sent to the provider"]),
         ]),
         ("Current Build Evidence", "The internal build is ready for hands-on validation.", [
@@ -651,7 +658,7 @@ def build_all() -> list[Path]:
     outputs = [_build_doc(spec) for spec in _doc_specs()]
     outputs.append(_build_deck())
     if SAMPLE_GUIDE.exists():
-        sample_out = OUT_DIR / "KCXDocumentor - Sample Generated User Guide - Blink Rx.docx"
+        sample_out = OUT_DIR / f"{SAMPLE_GUIDE_TITLE}.docx"
         shutil.copy2(SAMPLE_GUIDE, sample_out)
         _prepend_sample_recipe_cover(sample_out)
         outputs.append(sample_out)
@@ -660,20 +667,20 @@ def build_all() -> list[Path]:
 
 def _prepend_sample_recipe_cover(path: Path) -> None:
     sample_doc = Document(path)
-    sample_doc.core_properties.title = "KCXDocumentor - Sample Generated User Guide - Blink Rx"
+    sample_doc.core_properties.title = SAMPLE_GUIDE_TITLE
     sample_doc.core_properties.author = "keycentrix"
-    sample_doc.core_properties.comments = "Showcase copy packaged with the DamienDev document recipe pattern."
+    sample_doc.core_properties.comments = "Showcase copy packaged with the KCX document standard."
 
     front = Document()
     spec = DocSpec(
-        title="KCXDocumentor - Sample Generated User Guide - Blink Rx",
+        title=SAMPLE_GUIDE_TITLE,
         subtitle="Example generated guide packaged for executive review",
         document_id="KCXDOC-SAMPLE-001",
         status="Internal showcase sample",
         owner="keycentrix Product and Training",
         audience="Executive Team, Product, Training, Implementation, and Documentation Reviewers",
         purpose="Show a real KCXDocumentor generated guide as a packaged sample artifact.",
-        scope="Includes recipe front matter followed by the generated Blink Rx guide output.",
+        scope="Includes KCX front matter followed by the generated Newleaf Rx guide output.",
         sections=[],
         output_name=path.name,
     )
@@ -701,7 +708,7 @@ def _prepend_sample_recipe_cover(path: Path) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build KCXDocumentor prototype collateral using the DamienDev recipe pattern.")
+    parser = argparse.ArgumentParser(description="Build KCXDocumentor prototype collateral using the KCX document standard.")
     parser.add_argument("--all", action="store_true", help="Build the full prototype collateral package.")
     args = parser.parse_args()
     outputs = build_all() if args.all else build_all()

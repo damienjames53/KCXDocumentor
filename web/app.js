@@ -70,6 +70,7 @@ const els = {
   authGate: document.querySelector("#authGate"),
   authStatusText: document.querySelector("#authStatusText"),
   loginButton: document.querySelector("#loginButton"),
+  headerLoginButton: document.querySelector("#headerLoginButton"),
   authUserPanel: document.querySelector("#authUserPanel"),
   authUserName: document.querySelector("#authUserName"),
   logoutButton: document.querySelector("#logoutButton"),
@@ -102,6 +103,7 @@ const els = {
   qaDocxButton: document.querySelector("#qaDocxButton"),
   qaStatusTitle: document.querySelector("#qaStatusTitle"),
   qaStatusText: document.querySelector("#qaStatusText"),
+  cloudAuthNotice: document.querySelector("#cloudAuthNotice"),
   operationStatus: document.querySelector("#operationStatus"),
   operationStatusText: document.querySelector("#operationStatusText"),
   selectedSessionPill: document.querySelector("#selectedSessionPill"),
@@ -128,6 +130,7 @@ const els = {
   sessionVideoTime: document.querySelector("#sessionVideoTime"),
   useVideoTimeButton: document.querySelector("#useVideoTimeButton"),
   closeFrameCapture: document.querySelector("#closeFrameCapture"),
+  screenshotGapTasks: document.querySelector("#screenshotGapTasks"),
   frameInspectModal: document.querySelector("#frameInspectModal"),
   frameInspectTitle: document.querySelector("#frameInspectTitle"),
   frameInspectMeta: document.querySelector("#frameInspectMeta"),
@@ -187,7 +190,7 @@ const HELP_TOPICS = [
       "Open the Frames tab after processing a recording.",
       "Approve screenshots that clearly show the application state needed by the guide.",
       "Reject Teams overlays, participant tiles, title cards, transitions, or confusing application states.",
-      "Use Add Candidate to open the video picker, pause on the desired moment, and capture the frame manually.",
+      "Use Add from Video to open the video picker, pause on the desired moment, and capture the frame manually.",
       "Reviewer notes are preserved as guidance. Rejected images are not sent into guide generation.",
     ],
     action: { label: "Open Frames Tab", type: "tab", target: "frames" },
@@ -250,6 +253,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
 function bindEvents() {
   els.loginButton.addEventListener("click", login);
+  els.headerLoginButton.addEventListener("click", login);
   els.logoutButton.addEventListener("click", logout);
   els.refreshAll.addEventListener("click", refreshAll);
   els.helpButton.addEventListener("click", openHelpDrawer);
@@ -276,6 +280,7 @@ function bindEvents() {
   els.closeFrameInspect.addEventListener("click", closeFrameInspect);
   els.frameInspectModal.addEventListener("click", handleFrameInspectBackdrop);
   document.addEventListener("keydown", handleGlobalKeydown);
+  els.screenshotGapTasks?.addEventListener("click", handleFrameAction);
   els.frameGrid.addEventListener("click", handleFrameAction);
   els.frameGrid.addEventListener("change", handleFrameFieldChange);
   els.frameGrid.addEventListener("input", handleFrameNoteInput);
@@ -629,6 +634,11 @@ async function processRecording(event) {
 async function generateDraft() {
   const sessionId = requireSessionId();
   if (!sessionId) return;
+  if (!isAuthenticated()) {
+    logActivity("Sign in with Microsoft to create an AI guide. Local review work is still available.", "warn");
+    await login();
+    return;
+  }
 
   setOperation("Starting AI guide creation...", AI_CREATE_MESSAGES);
   setBusy(true);
@@ -667,6 +677,16 @@ async function buildDocxForSession(sessionId) {
   const result = await apiPost("/api/build-docx", { sessionId });
   assertCommandSucceeded(result, "DOCX build");
   logActivity("DOCX built.");
+  if (isAuthenticated()) {
+    try {
+      const reportResult = await cloudApiPost("/api/report-page-count", { sessionId });
+      if (reportResult?.pageCount) {
+        logActivity(`AI Spend page count updated: ${formatPageCount(reportResult.pageCount)} pages.`);
+      }
+    } catch (error) {
+      logActivity(`Page count reporting skipped: ${error.message}`, "warn");
+    }
+  }
   state.session = mergeSessionResult(state.session, result);
   await refreshSessionState(sessionId);
   return result;
@@ -1129,11 +1149,6 @@ function handleAuthRejected() {
   if (state.auth.config?.enabled === false) return;
   state.auth.account = null;
   state.auth.client?.setActiveAccount?.(null);
-  state.recordings = [];
-  state.transcripts = [];
-  state.sessions = [];
-  state.session = null;
-  state.selectedSessionId = "";
   state.auth.error = "Your sign-in session expired or could not be validated. Sign in again to continue.";
   renderAll();
 }
@@ -1233,6 +1248,8 @@ function renderAuth() {
   const loading = state.auth.loading;
   document.body.classList.toggle("auth-required", false);
   els.authGate.hidden = !enabled || authenticated || state.activePage !== "usage";
+  els.headerLoginButton.hidden = !enabled || authenticated;
+  els.headerLoginButton.disabled = loading || state.busy;
   els.authUserPanel.hidden = !enabled || !authenticated;
   els.loginButton.disabled = loading || state.busy;
   els.logoutButton.disabled = loading || state.busy;
@@ -1461,6 +1478,10 @@ function renderTrace() {
         <span>${escapeHtml(segment.start || "")} - ${escapeHtml(segment.end || "")}</span>
         <b>${formatPercent(confidence.overall)}</b>
       </header>
+      <div class="segment-quality-row">
+        ${renderSegmentQualityPill(segment)}
+        ${renderSegmentQualityLabels(segment)}
+      </div>
       <p>${escapeHtml(segment.speakerText || "No transcript text available.")}</p>
       <div class="tag-row">${renderTags(segment.actionHints || [])}${renderTags(segment.visibleUiText || [], "ui")}</div>
       ${renderReasons(confidence.reasons)}
@@ -1474,6 +1495,7 @@ function renderFrames() {
   renderAddFrameSegments();
   renderFrameCapturePicker();
   renderFrameInspect();
+  renderScreenshotGapTasks();
   updateFrameReviewStatus();
   if (frames.length === 0) {
     els.frameGrid.className = "frame-grid empty-state";
@@ -1481,44 +1503,146 @@ function renderFrames() {
     return;
   }
 
-  els.frameGrid.className = "frame-grid";
+  els.frameGrid.className = "frame-groups";
   els.frameGrid.innerHTML = "";
-  frames.slice(0, 48).forEach((frame) => {
-    const review = getFrameReview(frame);
-    const frameId = getFrameId(frame);
-    const card = document.createElement("article");
-    card.className = `frame-card ${review.reviewStatus}`;
-    card.dataset.frameId = frameId;
-    const path = frame.path || "";
-    const confidence = frame.confidence ?? frame.score;
-    card.innerHTML = `
-      <button class="frame-preview" type="button" data-frame-inspect="${escapeAttribute(frameId)}" aria-label="Inspect candidate frame ${escapeAttribute(frame.frameId || frame.id || frameId || "")}">
-        ${path ? `<img src="${escapeAttribute(frameUrl(path))}" alt="Candidate frame ${escapeAttribute(frame.frameId || frame.id || "")}">` : `<span>No image</span>`}
-      </button>
-      <header class="frame-card-header">
-        <strong>${escapeHtml(frame.frameId || frame.id || frameId || "frame")}</strong>
-        <small>${escapeHtml(review.reviewStatus)} · ${formatPercent(confidence)}</small>
+  frameGroups(frames.slice(0, 60)).forEach((group) => {
+    if (group.frames.length === 0) return;
+    const section = document.createElement("section");
+    section.className = `frame-group frame-group-${group.id}`;
+    section.innerHTML = `
+      <header class="frame-group-header">
+        <strong>${escapeHtml(group.label)}</strong>
+        <span>${escapeHtml(group.detail)}</span>
       </header>
-      <span>${escapeHtml(frame.segmentId || "")} at ${escapeHtml(frame.timestamp || "")}</span>
-      <div class="frame-actions" aria-label="Review ${escapeAttribute(frameId)}">
-        <button class="secondary ${review.reviewStatus === "approved" ? "active" : ""}" type="button" data-frame-action="approved">Approve</button>
-        <button class="secondary ${review.reviewStatus === "rejected" ? "active danger" : "danger"}" type="button" data-frame-action="rejected">Reject</button>
-        <button class="secondary ${review.reviewStatus === "pending" ? "active" : ""}" type="button" data-frame-action="pending">Pending</button>
-      </div>
-      <label class="frame-field">
-        <span>Assigned segment</span>
-        ${renderSegmentSelect(review.assignedSegmentId || frame.segmentId || "", "frame-assign")}
-      </label>
-      <label class="frame-field">
-        <span>Review note</span>
-        <textarea class="frame-note" rows="2" placeholder="Concern, crop issue, or reviewer guidance">${escapeHtml(review.reviewNote || "")}</textarea>
-      </label>
+      <div class="frame-group-grid"></div>
     `;
-    els.frameGrid.append(card);
+    const grid = section.querySelector(".frame-group-grid");
+    group.frames.forEach((frame) => grid.append(renderFrameCard(frame)));
+    els.frameGrid.append(section);
   });
 }
 
+function renderFrameCard(frame) {
+  const review = getFrameReview(frame);
+  const frameId = getFrameId(frame);
+  const card = document.createElement("article");
+  const group = frameRecommendationGroup(frame);
+  card.className = `frame-card ${review.reviewStatus} ${group.id}`;
+  card.dataset.frameId = frameId;
+  const path = frame.path || "";
+  const confidence = frame.frameEvidenceScore ?? frame.confidence ?? frame.score;
+  const ocrConfidence = frame.ocrConfidence;
+  card.innerHTML = `
+    <button class="frame-preview" type="button" data-frame-inspect="${escapeAttribute(frameId)}" aria-label="Inspect candidate frame ${escapeAttribute(frame.frameId || frame.id || frameId || "")}">
+      ${path ? `<img src="${escapeAttribute(frameUrl(path))}" alt="Candidate frame ${escapeAttribute(frame.frameId || frame.id || "")}">` : `<span>No image</span>`}
+    </button>
+    <header class="frame-card-header">
+      <strong>${escapeHtml(frame.frameId || frame.id || frameId || "frame")}</strong>
+      <small>${escapeHtml(review.reviewStatus)} · Evidence ${formatPercent(confidence)}${Number.isFinite(Number(ocrConfidence)) ? ` · OCR ${formatPercent(ocrConfidence)}` : ""}</small>
+    </header>
+    <div class="frame-card-meta">
+      <span class="frame-group-pill ${escapeAttribute(group.id)}">${escapeHtml(group.label)}</span>
+      <span>${escapeHtml(frame.segmentId || "")} at ${escapeHtml(frame.timestamp || "")}</span>
+    </div>
+    ${frameWarningText(frame) ? `<p class="frame-warning">${escapeHtml(frameWarningText(frame))}</p>` : ""}
+    <div class="frame-actions" aria-label="Review ${escapeAttribute(frameId)}">
+      <button class="secondary ${review.reviewStatus === "approved" ? "active" : ""}" type="button" data-frame-action="approved">Approve</button>
+      <button class="secondary ${review.reviewStatus === "rejected" ? "active danger" : "danger"}" type="button" data-frame-action="rejected">Reject</button>
+      <button class="secondary ${review.reviewStatus === "pending" ? "active" : ""}" type="button" data-frame-action="pending">Pending</button>
+    </div>
+    <label class="frame-field">
+      <span>Assigned segment</span>
+      ${renderSegmentSelect(review.assignedSegmentId || frame.segmentId || "", "frame-assign")}
+    </label>
+    <label class="frame-field">
+      <span>Review note</span>
+      <textarea class="frame-note" rows="2" placeholder="Concern, crop issue, or reviewer guidance">${escapeHtml(review.reviewNote || "")}</textarea>
+    </label>
+  `;
+  return card;
+}
+
+function frameGroups(frames) {
+  const sorted = [...frames].sort(frameSortKey);
+  return [
+    {
+      id: "recommended",
+      label: "Recommended",
+      detail: "Best local candidates for guide screenshots.",
+      frames: sorted.filter((frame) => frameRecommendationGroup(frame).id === "recommended"),
+    },
+    {
+      id: "alternate",
+      label: "Alternates",
+      detail: "Usable backups that may help if the recommended frame is not enough.",
+      frames: sorted.filter((frame) => frameRecommendationGroup(frame).id === "alternate"),
+    },
+    {
+      id: "system-rejected",
+      label: "Needs Attention",
+      detail: "Weak, duplicate, blurry, meeting, or supporting-tool frames. Approve only if intentionally needed.",
+      frames: sorted.filter((frame) => frameRecommendationGroup(frame).id === "system-rejected"),
+    },
+  ];
+}
+
+function frameSortKey(left, right) {
+  const groupRank = { recommended: 0, alternate: 1, "system-rejected": 2 };
+  const leftGroup = frameRecommendationGroup(left).id;
+  const rightGroup = frameRecommendationGroup(right).id;
+  return (
+    (groupRank[leftGroup] ?? 1) - (groupRank[rightGroup] ?? 1) ||
+    Number(right.frameEvidenceScore ?? right.confidence ?? right.score ?? 0) - Number(left.frameEvidenceScore ?? left.confidence ?? left.score ?? 0) ||
+    Number(left.timestampSeconds || 0) - Number(right.timestampSeconds || 0)
+  );
+}
+
+function renderScreenshotGapTasks() {
+  if (!els.screenshotGapTasks) return;
+  const tasks = screenshotGapTasks();
+  els.screenshotGapTasks.hidden = tasks.length === 0;
+  if (tasks.length === 0) {
+    els.screenshotGapTasks.innerHTML = "";
+    return;
+  }
+  els.screenshotGapTasks.innerHTML = `
+    <header>
+      <strong>Screenshot Gaps</strong>
+      <span>${tasks.length} segment${tasks.length === 1 ? "" : "s"} need a better application screenshot.</span>
+    </header>
+    ${tasks.slice(0, 8).map((task) => `
+      <button class="screenshot-gap-task" type="button" data-gap-segment="${escapeAttribute(task.sourceSegmentId || "")}">
+        <strong>${escapeHtml(task.sourceSegmentId || "Segment")}</strong>
+        <span>${escapeHtml(task.description || "Capture a clearer application screenshot.")}</span>
+      </button>
+    `).join("")}
+  `;
+}
+
+function renderSegmentQualityPill(segment) {
+  const quality = segment.qualityLabel || (segment.confidence?.needsHumanReview ? "review" : "publishable");
+  const label = quality === "needs-review" ? "Needs review" : quality === "review" ? "Review" : "Publishable";
+  const state = quality === "needs-review" ? "bad" : quality === "review" ? "warn" : "good";
+  return `<span class="segment-quality ${state}">${escapeHtml(label)}</span>`;
+}
+
+function renderSegmentQualityLabels(segment) {
+  const labels = Array.isArray(segment.qualityLabels) ? segment.qualityLabels : [];
+  return labels.slice(0, 5).map((item) => {
+    const label = typeof item === "string" ? item : item.label || item.id || "";
+    const state = typeof item === "string" ? "warn" : item.severity || "warn";
+    return `<span class="segment-quality-label ${escapeAttribute(state)}">${escapeHtml(label)}</span>`;
+  }).join("");
+}
+
 function handleFrameAction(event) {
+  const gapButton = event.target.closest("[data-gap-segment]");
+  if (gapButton) {
+    if (els.addFrameSegment) els.addFrameSegment.value = gapButton.dataset.gapSegment || "";
+    openFrameCapturePicker();
+    return;
+  }
+
   const inspectButton = event.target.closest("[data-frame-inspect]");
   if (inspectButton) {
     openFrameInspect(inspectButton.dataset.frameInspect);
@@ -1701,9 +1825,11 @@ function renderFrameInspect() {
   const review = getFrameReview(frame);
   const frameId = getFrameId(frame);
   const path = frame.path || "";
-  const confidence = frame.confidence ?? frame.score;
+  const confidence = frame.frameEvidenceScore ?? frame.confidence ?? frame.score;
+  const ocrConfidence = frame.ocrConfidence;
+  const group = frameRecommendationGroup(frame);
   els.frameInspectTitle.textContent = frame.frameId || frame.id || frameId || "Frame Preview";
-  els.frameInspectMeta.textContent = `${review.reviewStatus || "pending"} · ${frame.timestamp || "unknown time"} · ${formatPercent(confidence)}`;
+  els.frameInspectMeta.textContent = `${review.reviewStatus || "pending"} · ${group.label} · ${frame.timestamp || "unknown time"} · ${formatPercent(confidence)}${Number.isFinite(Number(ocrConfidence)) ? ` · OCR ${formatPercent(ocrConfidence)}` : ""}`;
   if (path) {
     els.frameInspectImage.src = frameUrl(path);
     els.frameInspectImage.alt = `Candidate frame ${frame.frameId || frame.id || frameId}`;
@@ -1716,12 +1842,89 @@ function renderFrameInspect() {
       <div><dt>Frame</dt><dd>${escapeHtml(frameId)}</dd></div>
       <div><dt>Timestamp</dt><dd>${escapeHtml(frame.timestamp || "--")}</dd></div>
       <div><dt>Status</dt><dd>${escapeHtml(review.reviewStatus || "pending")}</dd></div>
+      <div><dt>Evidence Score</dt><dd>${formatPercent(confidence)}</dd></div>
+      <div><dt>Recommendation</dt><dd>${escapeHtml(group.label)}</dd></div>
+      <div><dt>Visual Quality</dt><dd>${formatPercent(frame.visualQualityScore)}</dd></div>
+      <div><dt>OCR Relevance</dt><dd>${formatPercent(frame.ocrRelevanceScore)}</dd></div>
+      <div><dt>Frame Type</dt><dd>${escapeHtml(frameTypeText(frame))}</dd></div>
       <div><dt>Assigned Segment</dt><dd>${escapeHtml(review.assignedSegmentId || frame.segmentId || "No assignment")}</dd></div>
+      <div><dt>Recommendation Reason</dt><dd>${escapeHtml(frame.recommendationReason || frameSelectionReasonText(frame) || "--")}</dd></div>
       <div><dt>Selection Reason</dt><dd>${escapeHtml(frame.reason || frame.selectionReason || "--")}</dd></div>
+      <div><dt>OCR Text</dt><dd>${escapeHtml(frame.ocrText || "No OCR text captured.")}</dd></div>
       <div><dt>Review Note</dt><dd>${escapeHtml(review.reviewNote || "No reviewer note.")}</dd></div>
     </dl>
   `;
   els.closeFrameInspect.focus({ preventScroll: true });
+}
+
+function frameWarningText(frame) {
+  if (frameRecommendationGroup(frame).id === "system-rejected" && frame.recommendationReason) return frame.recommendationReason;
+  if (frame.ocrNonApplication) return "Likely non-application frame";
+  if (frame.ocrSupportingTool) return "Supporting-tool frame";
+  if (frame.dedupeState === "near-duplicate") return "Near-duplicate frame";
+  if (frame.blurState === "blurry") return "Blurry frame";
+  return "";
+}
+
+function frameSelectionReasonText(frame) {
+  if (Array.isArray(frame.selectionReasons)) return frame.selectionReasons.join("; ");
+  if (Array.isArray(frame.positiveSignals) || Array.isArray(frame.penalties)) {
+    return [...(frame.positiveSignals || []), ...(frame.penalties || [])].join("; ");
+  }
+  return "";
+}
+
+function frameRecommendationGroup(frame) {
+  const explicit = frame.recommendationGroup || frame.selectionDecision;
+  if (["recommended", "alternate", "system-rejected"].includes(explicit)) {
+    return {
+      id: explicit,
+      label: explicit === "system-rejected" ? "Needs attention" : explicit === "recommended" ? "Recommended" : "Alternate",
+    };
+  }
+  const evidence = Number(frame.frameEvidenceScore ?? frame.confidence ?? frame.score ?? 0);
+  if (frame.ocrNonApplication || (frame.ocrSupportingTool && !frame.supportingToolAllowed) || (frame.blurState === "blurry" && evidence < 0.65) || evidence < 0.25) {
+    return { id: "system-rejected", label: "Needs attention" };
+  }
+  if (frame.ocrClass === "application" && evidence >= 0.55 && frame.blurState !== "blurry") {
+    return { id: "recommended", label: "Recommended" };
+  }
+  return { id: "alternate", label: "Alternate" };
+}
+
+function frameTypeText(frame) {
+  if (frame.ocrNonApplication) return "Likely non-application frame";
+  if (frame.ocrSupportingTool) return "Supporting-tool frame";
+  if (frame.dedupeState === "near-duplicate") return `Near-duplicate of ${frame.duplicateOfFrameId || "another frame"}`;
+  if (frame.blurState === "blurry") return "Blurry application frame candidate";
+  return "Application frame candidate";
+}
+
+function screenshotGapTasks() {
+  const trace = getTrace() || {};
+  const explicit = Array.isArray(trace.screenshotGapTasks) ? trace.screenshotGapTasks : Array.isArray(state.session?.screenshotGapTasks) ? state.session.screenshotGapTasks : [];
+  if (explicit.length > 0) return explicit;
+  return getSegments()
+    .filter((segment) => segment.screenshotGap?.needsBetterScreenshot || !segmentHasRecommendedFrame(segment))
+    .map((segment) => ({
+      type: "screenshot-gap",
+      sourceSegmentId: segment.id,
+      description: segment.screenshotGap?.message || "Capture or approve a clearer application screenshot for this segment.",
+      reasons: segment.screenshotGap?.reasons || [],
+      recommendedWindow: segment.screenshotGap?.recommendedWindow || {
+        start: segment.start,
+        end: segment.end,
+        startSeconds: segment.startSeconds,
+        endSeconds: segment.endSeconds,
+      },
+    }));
+}
+
+function segmentHasRecommendedFrame(segment) {
+  return (segment.candidateImages || []).some((image) => {
+    const review = getFrameReview(image);
+    return review.reviewStatus === "approved" || frameRecommendationGroup(image).id === "recommended";
+  });
 }
 
 function updateBodyModalState() {
@@ -2108,6 +2311,7 @@ function buildReadinessChecks(trace, segments) {
   const pendingImages = Math.max(0, imageCount - approvedImages - rejectedImages);
   const createdImages = frames.filter((image) => image.created).length;
   const lowConfidence = segments.filter((segment) => Number(segment.confidence?.overall || 0) < 0.75).length;
+  const gapCount = screenshotGapTasks().length;
   const generation = state.generationMetadata;
 
   const checks = [
@@ -2128,8 +2332,8 @@ function buildReadinessChecks(trace, segments) {
     },
     {
       label: "Screenshot review",
-      state: imageCount === 0 ? "bad" : pendingImages ? "warn" : approvedImages ? "good" : "warn",
-      detail: `${approvedImages} approved, ${rejectedImages} rejected, ${pendingImages} pending from ${imageCount} candidates.`,
+      state: imageCount === 0 || gapCount ? "bad" : pendingImages ? "warn" : approvedImages ? "good" : "warn",
+      detail: `${approvedImages} approved, ${rejectedImages} rejected, ${pendingImages} pending from ${imageCount} candidates. ${gapCount} screenshot gaps.`,
     },
     {
       label: "Extracted images",
@@ -2330,22 +2534,7 @@ function downloadNameForArtifact(artifact) {
 }
 
 function guideDocxDownloadName() {
-  const title = state.generationMetadata?.title
-    || state.session?.generation?.title
-    || state.session?.draftSummary?.title
-    || state.session?.guideDraft?.title
-    || state.session?.title
-    || sessionTitleFromSource();
-  const sessionId = state.selectedSessionId || getSessionId(state.session);
-  const parts = [title, sessionId].filter(Boolean).map((part) => fileSlug(part, 72)).filter(Boolean);
-  const base = parts.length ? parts.join("-") : "kcxdocumentor-guide";
-  return `${base}.docx`;
-}
-
-function sessionTitleFromSource() {
-  const source = basename(state.session?.sourceFile || state.session?.recording?.sourceFile || els.recordingSelect.value || "");
-  const withoutExtension = source.replace(/\.[^.]+$/, "");
-  return withoutExtension || "kcxdocumentor-guide";
+  return "newleaf-rx-visual-guide.docx";
 }
 
 function safeDownloadName(name) {
@@ -2550,7 +2739,8 @@ function updateActionAvailability() {
   els.importRecordingButton.disabled = state.busy;
   els.importTranscriptButton.disabled = state.busy;
   els.processButton.disabled = state.busy || !hasRecording;
-  els.generateDraftButton.disabled = state.busy || !hasSession || !cloudReady;
+  els.generateDraftButton.disabled = state.busy || !hasSession;
+  els.generateDraftButton.textContent = !cloudReady && hasSession ? "Sign in to Create Guide" : "Create Guide";
   els.buildDocxButton.disabled = state.busy || !hasDocx;
   els.qaDocxButton.disabled = state.busy || !hasSession || !hasDocx;
   els.reloadSession.disabled = state.busy || !hasSession;
@@ -2566,6 +2756,7 @@ function updateActionAvailability() {
   els.generateDraftButton.title = !cloudReady
     ? "Sign in with Microsoft to create an AI guide."
     : hasSession ? "Create the AI guide, build the DOCX, and run local QA." : "Select or process a session first.";
+  els.cloudAuthNotice.hidden = cloudReady || !hasSession;
   els.buildDocxButton.title = hasDocx ? "Download the latest generated DOCX." : "Create a guide first.";
   els.qaDocxButton.title = hasDocx ? "Re-run local QA checks without using AI tokens." : "Create a guide first.";
 }

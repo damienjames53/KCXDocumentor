@@ -2,7 +2,7 @@
 
 This lane turns an imported workstation recording into a local session bundle for downstream guide-generation prototyping.
 
-It is intentionally useful before the complete OCR and CV stack exists. If `ffprobe` or `ffmpeg` are installed, the script uses them for media metadata, audio extraction, and interval frame extraction. When no transcript sidecar is provided, it runs local `whisper-cli` against the extracted narration audio when a local model is available. If media or STT tools are not available, it still emits deterministic placeholder JSON with the same shape so the AI guide draft, DOCX rendering, and QA work can continue.
+It is intentionally useful before the complete computer-vision stack exists. If `ffprobe` or `ffmpeg` are installed, the script uses them for media metadata, audio extraction, and interval frame extraction. When no transcript sidecar is provided, it runs local `whisper-cli` against the extracted narration audio when a local model is available. When Tesseract is available, it extracts visible UI text from candidate frames. If media, STT, or OCR tools are not available, it still emits deterministic placeholder JSON with the same shape so the AI guide draft, DOCX rendering, and QA work can continue.
 
 The local app server exposes the same lane for initial video testing:
 
@@ -25,7 +25,7 @@ Useful options:
 
 ```bash
 python3 scripts/process_recording.py samples/raw/example.mp4 \
-  --target-application "Enterprise Rx" \
+  --target-application "Newleaf Rx" \
   --segment-seconds 60 \
   --sample-interval-seconds 30 \
   --max-frames 120
@@ -66,19 +66,35 @@ frames/selected/
 `procedure_trace.json` is the primary downstream contract. It contains:
 
 - recording metadata
+- recording content classification based on transcript action density and OCR frame evidence
 - transcript-aligned procedure segments
-- visible UI text placeholders
+- visible UI text recognized from candidate frames when local Tesseract OCR is available
 - action hints inferred from transcript text
 - candidate frame references
+- segment quality labels, review priority, and screenshot gap status
+- candidate screenshot recommendation groups: recommended, alternate, or needs-attention/system-rejected
+- structured screenshot gap tasks for missing or weak application evidence
 - token strategy notes for the guide generator
 
 When media tools are missing, candidate images have `created: false` and `path: null`. That is expected. Downstream prototype code should rely on the JSON shape first and treat image files as optional until the frame-selection lane matures.
 
 When `ffmpeg` is available, candidate frames are extracted as browser-friendly `.png` files under `frames/candidates/`. PNG is used because UI screenshots embed reliably in DOCX and preserve application text better than compressed JPEG. Frame records include both `path` and `webPath` values relative to the session directory so the app can serve them through `/api/session?sessionId={id}&asset={path}`.
 
+When `tesseract` is available, `ocr.json` stores recognized UI text for each extracted candidate frame. The OCR payload includes text blocks, confidence scores, bounding boxes, and combined frame text. If Tesseract is missing or a frame cannot be read, the frame keeps a placeholder OCR entry with an error reason so the segment remains reviewable instead of silently losing visual evidence.
+
+The trace uses OCR and local visual scoring to protect the guide payload:
+
+- Application-like frames with strong evidence become `recommended`.
+- Lower-confidence but usable frames become `alternate`.
+- Teams/title cards, unrelated supporting tools, blurry low-confidence frames, and very weak candidates appear in the UI as **Needs Attention**. The internal trace value remains `system-rejected` for compatibility.
+- Needs Attention frames stay visible in the UI for transparency, but they are excluded from the AI payload unless a reviewer explicitly approves them.
+- Segments without a recommended application screenshot receive a `screenshotGap` and a top-level `screenshotGapTasks` entry.
+
 ## Frame Review Overlay
 
 Reviewer frame decisions are stored in `frame_review.json` as a session-local overlay instead of rewriting the original trace artifacts. This keeps the raw extraction reproducible while allowing a reviewer to approve useful screenshots, reject Teams chrome or title cards, add notes, and assign a candidate to a transcript segment.
+
+The UI groups frames into Recommended, Alternates, and Needs Attention. Reviewers can still approve a Needs Attention frame if it is intentionally useful, but the default behavior is to keep weak visual evidence out of the AI generation request.
 
 The local app exposes:
 
@@ -87,6 +103,14 @@ The local app exposes:
 - `POST /api/extract-frame` with a timestamp to add a PNG candidate from the source recording.
 
 Additional frames created through `/api/extract-frame` are appended to `frame_scores.json` with `source: manual-review-extract`, use the session crop filter from `manifest.json`, and receive a matching pending or approved `frame_review.json` entry.
+
+When a reviewer adds a frame from the video picker, the server now immediately runs the same local evidence enrichment used during initial processing:
+
+- visual quality scoring and duplicate checks are stored on the frame record
+- Tesseract OCR is run when available and the OCR result is appended to `ocr.json`
+- OCR classification, visible text, relevance, evidence score, and recommendation group are copied into `frame_scores.json`
+- if the reviewer selected a segment, the frame is attached to that segment during session reload and AI prompt preparation
+- the enriched OCR context is included in the compact guide-generation payload unless the reviewer rejects the frame or the system rejects it and the reviewer does not approve it
 
 ## Teams Recording Profile
 
@@ -112,7 +136,7 @@ When `--transcript` is not supplied, the processing lane attempts local transcri
 
 ```bash
 python3 scripts/process_recording.py samples/raw/example.mp4 \
-  --target-application "Enterprise Rx" \
+  --target-application "Newleaf Rx" \
   --whisper-model models/whisper/ggml-base.en.bin
 ```
 
@@ -133,7 +157,7 @@ The processing lane can still use a sidecar transcript when one is available. Si
 - `.vtt` and `.srt` captions are parsed into timestamped text segments when timestamps are present.
 - `.json` can be either a list of segments or an object with `segments`. Segment fields can include `text`, `speakerText`, `startSeconds`, `endSeconds`, `speaker`, and `confidence`.
 
-Sidecar-derived segments receive usable prototype confidence instead of placeholder confidence. They still remain reviewable because OCR and computer-vision scoring are not complete yet.
+Sidecar-derived segments receive usable prototype confidence instead of placeholder confidence. They still remain reviewable because frame selection is evidence-assisted, not fully automated visual validation.
 
 ## One-Hour Sample Defaults
 
@@ -148,10 +172,10 @@ That produces about 60 procedure-sized transcript segments and up to 120 frame c
 
 ## Current Prototype Limits
 
-This script performs local media extraction and local Whisper transcription, but OCR, visual dedupe, blur scoring, and AI summarization remain prototype lanes. It creates the local processing package those lanes will consume.
+This script performs local media extraction, local Whisper transcription, Tesseract OCR, OCR-aware frame evidence scoring, visual dedupe, blur scoring, content classification, frame recommendation grouping, and screenshot gap detection. It creates the local processing package the review UI, AI generation lane, DOCX renderer, and QA checks consume.
 
 Next implementation steps:
 
-- replace placeholder OCR with Tesseract frame OCR
-- replace deterministic frame scoring with OpenCV duplicate, blur, and UI-change scoring
-- add a review step for selecting final screenshots before DOCX rendering
+- continue strengthening app-vs-supporting-tool detection across more products
+- add richer document structures for slide/reference recordings instead of forcing every source into a procedural guide
+- expand reviewer analytics so screenshot gaps and segment quality labels can be summarized by session

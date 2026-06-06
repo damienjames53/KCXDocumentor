@@ -57,7 +57,7 @@ When a Teams transcript is available, use it for the first pass. Leave the trans
 3. In **Recording**, choose the screen recording you want to process.
 4. In **Transcript**, choose a transcript when one is available.
 5. Leave the transcript blank when you want KCXDocumentor to use local Whisper transcription.
-6. Set **Target Application** to the application being documented, such as `Blink Rx`.
+6. Set **Target Application** to the application being documented, such as `Newleaf Rx`.
 7. Use **Source Profile**:
    - `Standard` for ordinary screen recordings.
    - `Teams Recording` for Teams recordings with meeting overlays, title cards, or participant chrome.
@@ -66,8 +66,8 @@ When a Teams transcript is available, use it for the first pass. Leave the trans
 10. Open the **Frames** review area.
 11. Approve screenshots that clearly show the application state needed for a step.
 12. Reject screenshots that show Teams overlays, title cards, irrelevant transitions, or confusing UI states.
-13. Use **Add Candidate** when the automatic candidates missed an important screen.
-14. In the video picker, pause on the desired frame and capture it.
+13. Use **Add from Video** when the automatic candidates missed an important screen.
+14. In the video picker, pause on the desired frame and choose **Use Current Time**.
 15. Add a short reviewer note when a frame, term, or step needs human verification.
 16. Choose **Create Guide**.
 17. Keep the page open while the AI progress message is active.
@@ -76,7 +76,9 @@ When a Teams transcript is available, use it for the first pass. Leave the trans
 
 **Create Guide** performs the AI draft, DOCX build, and local QA check as one chained action. **Download DOCX** becomes useful after that workflow succeeds.
 
-The **Frames** tab is where reviewers approve, reject, assign, and comment on candidate screenshots. Rejected images are excluded from the AI guide context, while reviewer notes remain available as guidance.
+The **Frames** tab is where reviewers approve, reject, assign, and comment on candidate screenshots. Frames are grouped as **Recommended**, **Alternates**, and **Needs Attention**. Rejected images are excluded from the AI guide context, while reviewer notes remain available as guidance.
+
+When a reviewer adds a missing frame from the video picker, KCXDocumentor extracts the image locally, runs local OCR when Tesseract is available, maps the frame to the selected segment, and includes the compact OCR/context evidence in guide generation unless the frame is rejected.
 
 ![KCXDocumentor Frame Review](images/user-guide-frame-review.png)
 
@@ -160,16 +162,11 @@ It also does not remove Cosmos-backed AI Spend history.
 
 ## Recommended First Test
 
-For the current Blink Rx test material:
+For the first validation run:
 
-1. Select `Blink Rx Training Part 1 112125.mp4`.
-2. Select `Blink Rx Training Part 1 112125-en-US.vtt`.
-3. Set the target application to `Blink Rx`.
+1. Select a representative Newleaf Rx workflow recording.
+2. Select the transcript sidecar if one is available.
+3. Set the target application to `Newleaf Rx`.
 4. Use `Teams Recording` if the source includes Teams overlays.
-5. Process the recording.
-6. Review and reject overlay-heavy frames.
-7. Create the guide.
-8. Download and review the DOCX.
-9. Open **AI Spend** and confirm the successful generation appears in the current month.
-
-Repeat without the transcript to compare local Whisper output against the Teams transcript.
+5. Process the recording, review frames, create the guide, and download the DOCX.
+6. Open **AI Spend** and confirm the successful generation appears in the current month.

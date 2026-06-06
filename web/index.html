@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>KCXDocumentor Prototype Console</title>
+    <title>KCXDocumentor</title>
     <link rel="stylesheet" href="./styles.css">
     <script src="./vendor/msal-browser.min.js"></script>
   </head>
@@ -25,6 +25,7 @@
         </button>
         <button id="refreshAll" class="icon-button" type="button" title="Refresh recordings and sessions">Refresh</button>
         <button id="helpButton" class="icon-button" type="button" title="Open help and user guide">Help</button>
+        <button id="headerLoginButton" class="icon-button sign-in-button" type="button" title="Sign in for AI guide creation and AI Spend">Sign in</button>
         <div id="authUserPanel" class="auth-user-panel" hidden>
           <span id="authUserName">Signed in</span>
           <button id="logoutButton" class="icon-button" type="button">Logout</button>
@@ -91,7 +92,7 @@
           <div class="field-grid">
             <label>
               <span>Target application</span>
-              <input id="targetApplication" name="targetApplication" autocomplete="off" placeholder="Enterprise Rx">
+              <input id="targetApplication" name="targetApplication" autocomplete="off" placeholder="Newleaf Rx">
             </label>
             <label>
               <span>Source profile</span>
@@ -122,6 +123,10 @@
               <button id="processButton" type="submit">Process Recording</button>
               <button id="generateDraftButton" type="button">Create Guide</button>
               <button id="buildDocxButton" type="button">Download DOCX</button>
+            </div>
+            <div id="cloudAuthNotice" class="cloud-auth-notice" hidden>
+              <strong>Sign in required for AI guide creation.</strong>
+              <span>Local processing and frame review are available without signing in.</span>
             </div>
             <div class="qa-action-surface" aria-label="Guide QA status">
               <div>
@@ -184,7 +189,7 @@
         </div>
 
         <div class="tabs" role="tablist" aria-label="Session views">
-          <button class="tab active" type="button" data-tab="trace">Trace</button>
+          <button class="tab active" type="button" data-tab="trace">Segments</button>
           <button class="tab" type="button" data-tab="frames">Frames</button>
           <button class="tab" type="button" data-tab="artifacts">Artifacts</button>
           <button class="tab" type="button" data-tab="json">JSON</button>
@@ -236,6 +241,7 @@
               <button id="useVideoTimeButton" type="button">Use Current Time</button>
             </div>
           </div>
+          <div id="screenshotGapTasks" class="screenshot-gap-tasks" hidden></div>
           <div id="frameGrid" class="frame-grid empty-state">Candidate frames will appear after processing.</div>
         </div>
 

@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import sys
 from datetime import UTC, date, datetime
@@ -162,7 +163,8 @@ def load_frame_score_lookup(path: Path) -> dict[str, dict[str, Any]]:
 
 
 def frame_score_to_candidate_image(frame: dict[str, Any]) -> dict[str, Any]:
-    return {
+    quality = frame.get("qualitySignals") if isinstance(frame.get("qualitySignals"), dict) else {}
+    image = {
         "frameId": frame.get("id", ""),
         "path": frame.get("path"),
         "webPath": frame.get("webPath") or frame.get("path"),
@@ -170,10 +172,41 @@ def frame_score_to_candidate_image(frame: dict[str, Any]) -> dict[str, Any]:
         "timestampSeconds": frame.get("timestampSeconds", 0),
         "score": frame.get("score", 0),
         "confidence": frame.get("score", 0),
+        "visualQualityScore": quality.get("qualityScore"),
+        "blurState": quality.get("blurState"),
+        "dedupeState": quality.get("dedupeState"),
+        "duplicateOfFrameId": quality.get("duplicateOfFrameId"),
         "created": frame.get("created", False),
         "reason": frame.get("selectionReason", "Added during frame review."),
         "reviewStatus": "pending",
     }
+    for key in (
+        "frameEvidenceScore",
+        "ocrConfidence",
+        "ocrRelevanceScore",
+        "ocrNonApplication",
+        "ocrSupportingTool",
+        "ocrClass",
+        "ocrClassConfidence",
+        "appOcrScore",
+        "appTermHits",
+        "supportingToolHits",
+        "nonApplicationHits",
+        "ocrTokenCount",
+        "supportingToolAllowed",
+        "ocrText",
+        "ocrSource",
+        "contentType",
+        "recommendationGroup",
+        "selectionDecision",
+        "recommendationReason",
+        "selectionReasons",
+        "positiveSignals",
+        "penalties",
+    ):
+        if key in frame:
+            image[key] = frame.get(key)
+    return image
 
 
 def apply_review_entry_to_image(image: dict[str, Any], entry: dict[str, Any]) -> None:
@@ -189,11 +222,15 @@ def attach_screenshot_references(draft: dict[str, Any], trace: dict[str, Any]) -
     processed_root = WORKSPACE / "samples" / "processed" / session_id if session_id else None
 
     timeline_candidates = all_trace_candidates(segment_lookup)
+    used_frame_ids: set[str] = set()
 
     def enrich_step(step: dict[str, Any], index: int, total: int) -> None:
         if step_has_screenshot(step):
+            existing_frame_id = existing_step_frame_id(step)
+            if existing_frame_id:
+                used_frame_ids.add(existing_frame_id)
             return
-        candidate = best_candidate_for_step(step, segment_lookup, timeline_candidates, index, total)
+        candidate = best_candidate_for_step(step, segment_lookup, timeline_candidates, index, total, used_frame_ids)
         if not candidate:
             step["needsHumanReview"] = True
             notes = step.setdefault("reviewNotes", [])
@@ -205,11 +242,20 @@ def attach_screenshot_references(draft: dict[str, Any], trace: dict[str, Any]) -
         step["screenshot"] = screenshot.get("path", "")
         step["screenshotRef"] = screenshot.get("frameId", "")
         step.setdefault("caption", f"Workflow screen at {screenshot.get('timestamp', 'unknown time')}")
+        if screenshot.get("frameId"):
+            used_frame_ids.add(str(screenshot["frameId"]))
 
     steps = iter_draft_steps(draft)
     for index, step in enumerate(steps):
         enrich_step(step, index, len(steps))
     return draft
+
+
+def existing_step_frame_id(step: dict[str, Any]) -> str:
+    selected = step.get("selectedScreenshot") or step.get("selected_screenshot")
+    if isinstance(selected, dict):
+        return str(selected.get("frameId") or selected.get("id") or "").strip()
+    return str(step.get("screenshotRef") or "").strip()
 
 
 def iter_draft_steps(draft: dict[str, Any]) -> list[dict[str, Any]]:
@@ -241,7 +287,9 @@ def best_candidate_for_step(
     timeline_candidates: list[dict[str, Any]],
     step_index: int,
     step_count: int,
+    used_frame_ids: set[str] | None = None,
 ) -> dict[str, Any] | None:
+    used_frame_ids = used_frame_ids or set()
     segment_ids = as_string_list(
         step.get("sourceSegmentId")
         or step.get("sourceSegments")
@@ -259,10 +307,10 @@ def best_candidate_for_step(
                 enriched["sourceSegmentId"] = segment_id
                 candidates.append(enriched)
     if not candidates:
-        return timeline_candidate_for_step(timeline_candidates, step_index, step_count)
+        return timeline_candidate_for_step(timeline_candidates, step_index, step_count, used_frame_ids)
     if not candidates:
         return None
-    return sorted(candidates, key=screenshot_sort_key)[0]
+    return best_non_reused_candidate(candidates, used_frame_ids)
 
 
 def all_trace_candidates(segment_lookup: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
@@ -280,19 +328,50 @@ def all_trace_candidates(segment_lookup: dict[str, dict[str, Any]]) -> list[dict
     return sorted(by_frame.values(), key=lambda item: (item.get("timestampSeconds") or 0, screenshot_sort_key(item)))
 
 
-def screenshot_sort_key(image: dict[str, Any]) -> tuple[int, float, float]:
+def screenshot_sort_key(image: dict[str, Any]) -> tuple[int, int, int, int, int, float, float, float, float]:
     review_rank = 0 if image.get("reviewStatus") == "approved" else 1
-    return (review_rank, -float(image.get("score") or 0), float(image.get("timestampSeconds") or 0))
+    group = image.get("recommendationGroup") or image.get("selectionDecision")
+    group_rank = 0 if group == "recommended" else 2 if group == "system-rejected" else 1
+    frame_type_rank = 0 if image.get("ocrClass") == "application" else 2 if image.get("ocrNonApplication") else 1 if image.get("ocrSupportingTool") else 1
+    duplicate_rank = 1 if image.get("dedupeState") == "near-duplicate" else 0
+    blur_rank = 1 if image.get("blurState") == "blurry" else 0
+    return (
+        review_rank,
+        group_rank,
+        frame_type_rank,
+        blur_rank,
+        -float(image.get("frameEvidenceScore") or image.get("confidence") or 0),
+        duplicate_rank,
+        -float(image.get("visualQualityScore") or 0),
+        -float(image.get("score") or 0),
+        float(image.get("timestampSeconds") or 0),
+    )
 
 
-def timeline_candidate_for_step(candidates: list[dict[str, Any]], step_index: int, step_count: int) -> dict[str, Any] | None:
+def best_non_reused_candidate(candidates: list[dict[str, Any]], used_frame_ids: set[str]) -> dict[str, Any] | None:
+    sorted_candidates = sorted(candidates, key=screenshot_sort_key)
+    unused = [
+        candidate
+        for candidate in sorted_candidates
+        if str(candidate.get("frameId") or candidate.get("path") or "") not in used_frame_ids
+    ]
+    return (unused or sorted_candidates)[0] if sorted_candidates else None
+
+
+def timeline_candidate_for_step(candidates: list[dict[str, Any]], step_index: int, step_count: int, used_frame_ids: set[str] | None = None) -> dict[str, Any] | None:
     if not candidates:
         return None
+    used_frame_ids = used_frame_ids or set()
+    available = [
+        candidate
+        for candidate in candidates
+        if str(candidate.get("frameId") or candidate.get("path") or "") not in used_frame_ids
+    ] or candidates
     if step_count <= 1:
-        return candidates[0]
+        return available[0]
     position = step_index / max(1, step_count - 1)
-    candidate_index = round(position * (len(candidates) - 1))
-    return candidates[max(0, min(len(candidates) - 1, candidate_index))]
+    candidate_index = round(position * (len(available) - 1))
+    return available[max(0, min(len(available) - 1, candidate_index))]
 
 
 def build_screenshot_reference(
@@ -302,7 +381,7 @@ def build_screenshot_reference(
 ) -> dict[str, Any]:
     path = image.get("path") or ""
     resolved_path = str((processed_root / path).resolve()) if processed_root and path else path
-    return {
+    reference = {
         "frameId": image.get("frameId", ""),
         "path": resolved_path,
         "relativePath": path,
@@ -312,6 +391,26 @@ def build_screenshot_reference(
         "sourceSegmentId": segment.get("id", ""),
         "reviewStatus": image.get("reviewStatus", "pending"),
     }
+    for key in (
+        "frameEvidenceScore",
+        "visualQualityScore",
+        "ocrConfidence",
+        "ocrRelevanceScore",
+        "ocrClass",
+        "appOcrScore",
+        "blurState",
+        "dedupeState",
+        "duplicateOfFrameId",
+        "ocrSupportingTool",
+        "ocrNonApplication",
+        "contentType",
+        "recommendationGroup",
+        "selectionDecision",
+        "recommendationReason",
+    ):
+        if key in image:
+            reference[key] = image.get(key)
+    return reference
 
 
 def as_string_list(value: Any) -> list[str]:
@@ -699,6 +798,7 @@ def prepare_trace_for_anthropic(trace: dict[str, Any]) -> dict[str, Any]:
     for segment in segments:
         if not isinstance(segment, dict):
             continue
+        segment["visibleUiText"] = compact_visible_ui_text(segment.get("visibleUiText"))
         images = segment.get("candidateImages") if isinstance(segment.get("candidateImages"), list) else []
         kept_images = []
         for image in images:
@@ -716,16 +816,116 @@ def prepare_trace_for_anthropic(trace: dict[str, Any]) -> dict[str, Any]:
                             "sourceSegmentId": excluded.get("sourceSegmentId", ""),
                             "message": note,
                         }
-                    )
+                )
                 continue
-            kept_images.append(image)
-        segment["candidateImages"] = kept_images
+            if image.get("recommendationGroup") == "system-rejected" and str(image.get("reviewStatus", "")).lower() != "approved":
+                excluded = excluded_frame_context(image, segment)
+                excluded["exclusionReason"] = image.get("recommendationReason") or "System pre-review rejected this frame."
+                excluded_frames.append(excluded)
+                continue
+            kept_images.append(compact_candidate_image(image))
+        segment["candidateImages"] = sorted(kept_images, key=screenshot_sort_key)[:3]
 
     if excluded_frames:
         prepared["excludedFrames"] = merge_excluded_frames(prepared.get("excludedFrames"), excluded_frames)
     if review_guidance:
         prepared["reviewGuidance"] = review_guidance
     return prepared
+
+
+def compact_visible_ui_text(value: Any, limit: int = 24) -> list[str]:
+    items = as_string_list(value)
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = re.sub(r"\s+", " ", item).strip()
+        if not useful_ocr_text(text):
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(text[:120])
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
+def compact_candidate_image(image: dict[str, Any]) -> dict[str, Any]:
+    kept_keys = (
+        "frameId",
+        "path",
+        "webPath",
+        "timestamp",
+        "timestampSeconds",
+        "score",
+        "confidence",
+        "frameEvidenceScore",
+        "ocrConfidence",
+        "ocrRelevanceScore",
+        "ocrNonApplication",
+        "ocrSupportingTool",
+        "ocrClass",
+        "ocrClassConfidence",
+        "appOcrScore",
+        "appTermHits",
+        "supportingToolHits",
+        "nonApplicationHits",
+        "supportingToolAllowed",
+        "visualQualityScore",
+        "blurState",
+        "dedupeState",
+        "duplicateOfFrameId",
+        "contentType",
+        "recommendationGroup",
+        "selectionDecision",
+        "recommendationReason",
+        "selectionReasons",
+        "positiveSignals",
+        "penalties",
+        "created",
+        "reviewStatus",
+        "assignedSegmentId",
+        "reviewNote",
+    )
+    compact = {key: image.get(key) for key in kept_keys if key in image}
+    reason = str(image.get("reason") or "").strip()
+    if reason:
+        compact["reason"] = reason[:220]
+    ocr_text = str(image.get("ocrText") or "").strip()
+    if ocr_text:
+        compact["ocrText"] = compact_ocr_text(ocr_text)
+    return compact
+
+
+def compact_ocr_text(text: str, limit: int = 360) -> str:
+    parts = []
+    seen: set[str] = set()
+    for raw_part in re.split(r"[\\n\\r|;]+", text):
+        part = re.sub(r"\s+", " ", raw_part).strip()
+        if not useful_ocr_text(part):
+            continue
+        key = part.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        parts.append(part)
+        if len(" | ".join(parts)) >= limit:
+            break
+    compact = " | ".join(parts)
+    if len(compact) > limit:
+        compact = compact[: limit - 1].rstrip() + "…"
+    return compact
+
+
+def useful_ocr_text(text: str) -> bool:
+    if not text:
+        return False
+    if len(text) <= 1:
+        return False
+    if re.fullmatch(r"[-_=:+*/.,()\\[\\]{}\\d\\s]+", text):
+        return False
+    return bool(re.search(r"[A-Za-z]{2,}", text))
 
 
 def normalize_review_guidance(value: Any) -> list[Any]:

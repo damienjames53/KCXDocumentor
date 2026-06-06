@@ -593,14 +593,23 @@ def is_likely_non_application_screenshot(path: Path | None) -> bool:
         return False
     try:
         with Image.open(path) as image:
-            sample = image.convert("L").resize((32, 32))
+            gray = image.convert("L")
+            sample = gray.resize((32, 32))
             histogram = sample.histogram()
             total_pixels = sum(histogram) or 1
             dark_ratio = sum(histogram[:32]) / total_pixels
             mean_luminance = ImageStat.Stat(sample).mean[0]
+            width, height = gray.size
+            center = gray.crop((int(width * 0.22), int(height * 0.28), int(width * 0.78), int(height * 0.72))).resize((32, 32))
+            center_histogram = center.histogram()
+            center_total = sum(center_histogram) or 1
+            center_dark_ratio = sum(center_histogram[:40]) / center_total
+            center_mean = ImageStat.Stat(center).mean[0]
     except Exception:
         return False
-    return dark_ratio >= 0.75 and mean_luminance < 45
+    if dark_ratio >= 0.75 and mean_luminance < 45:
+        return True
+    return center_dark_ratio >= 0.5 and center_mean < 150
 
 
 def normalize_step(step: dict[str, Any], index: int, input_path: Path, asset_roots: list[Path] | None = None) -> GuideStep:
@@ -616,6 +625,9 @@ def normalize_step(step: dict[str, Any], index: int, input_path: Path, asset_roo
     title = title or derive_title_from_action(action, index)
     expected_result = clean_visible_text(text_value(step, "expected_result", "expectedResult", "result", "outcome"), reviewer_comments)
     caption = clean_visible_text(caption, reviewer_comments)
+    if caption:
+        reviewer_comments.append(f"Screenshot caption evidence: {caption}")
+        caption = ""
     ui_text = as_list(pick_value(step, "visible_ui_text", "visibleUiText", "ui_text", "uiText", "ocr_text", "ocrText", "confirmedUiLabels"))
     action_hints = as_list(pick_value(step, "action_hints", "actionHints", "events", "actionHint", "actionHints"))
     if step.get("needsHumanReview") is True:
@@ -929,13 +941,6 @@ def render_step(doc: Document, step: GuideStep, index: int) -> list[str]:
             picture_p.add_run().add_picture(str(step.screenshot), width=Inches(6.1))
         except Exception as exc:
             add_labeled_paragraph(doc, "Screenshot unavailable", f"{step.screenshot} ({exc})")
-        else:
-            caption = add_rich_paragraph(doc, step.screenshot_caption or f"Step {index} screenshot")
-            caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            for run in caption.runs:
-                run.italic = True
-                run.font.name = FONT
-                run.font.size = Pt(8.8)
     else:
         pass
 

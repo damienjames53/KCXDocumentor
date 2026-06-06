@@ -14,6 +14,7 @@ Recommended length: 3 to 5 minutes.
 - Use a real source recording and show the import process.
 - Emphasize that raw video stays local.
 - Show frame approval/rejection because this is the human quality gate.
+- Show Add from Video and explain that added frames are OCR-enriched locally and mapped to the selected segment.
 - Show AI Spend to demonstrate cost visibility.
 - Close with the pilot ask: validate guide quality with trainers and BAs using real workflow recordings.
 
@@ -24,7 +25,7 @@ Recommended length: 3 to 5 minutes.
 | Opening | KCXDocumentor workspace | Long workflow recordings should not require hours of manual documentation work. | KCXDocumentor turns recorded workflow walkthroughs into structured DOCX guides using local processing, reviewer-selected screenshots, and controlled AI generation. |
 | Scene 1 - Import | Import recording and transcript controls | Users import recordings directly from the browser UI. | A BA or trainer imports a screen recording and, when available, a Teams transcript. The app copies the files into the mapped local working folder automatically. |
 | Scene 2 - Process Recording | Processing status and session creation | Media processing stays local. | FFmpeg, Whisper, and frame extraction run on the workstation. The app creates a compact trace and candidate screenshots without sending raw video to the AI provider. |
-| Scene 3 - Review Frames | Frame reviewer with approve, reject, and add candidate | Reviewers decide which screenshots are eligible for the guide. | The reviewer rejects Teams overlays or irrelevant frames and can pause the video to capture a better screenshot. Rejected frames are not sent into the AI guide context. |
+| Scene 3 - Review Frames | Frame reviewer with Recommended, Alternates, Needs Attention, and Add from Video | Reviewers decide which screenshots are eligible for the guide. | The reviewer rejects Teams overlays or irrelevant frames and can pause the video to capture a better screenshot. Added frames run local OCR, are mapped to the selected segment, and rejected frames are not sent into the AI guide context. |
 | Scene 4 - Create Guide | AI generation progress state | The guide is generated from compact reviewed context. | KCXDocumentor sends only compact prompt data through the authenticated Azure Function proxy. The Anthropic key stays server-side. |
 | Scene 5 - Download DOCX | Download DOCX and generated guide | The output is a reviewable Word guide. | The resulting DOCX contains reader-facing steps, selected screenshots, and reviewer comments where human validation is needed. |
 | Scene 6 - AI Spend | AI Spend page | Leadership gets cost and usage visibility. | The AI Spend page shows documents, tokens, pages, cost per page, current month spend, and which authenticated user generated each guide. |

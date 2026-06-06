@@ -7,6 +7,7 @@ import argparse
 import base64
 import hmac
 import hashlib
+import importlib.util
 import json
 import math
 import mimetypes
@@ -47,6 +48,7 @@ CLOUD_AUTH_API_PATHS = {
     "/api/usage-summary",
     "/api/generate-draft",
     "/api/migrate-usage",
+    "/api/report-page-count",
 }
 AUTH_SESSION_COOKIE = "KCXDocumentorAuth"
 AUTH_SESSION_SECRET = ""
@@ -62,6 +64,7 @@ REDACTION_PATTERNS = [
     re.compile(r"sk-ant-[A-Za-z0-9_-]+"),
 ]
 JWKS_CACHE: dict[str, Any] = {"url": "", "expires": 0.0, "keys": []}
+PROCESS_RECORDING_MODULE: Any | None = None
 
 
 def load_env_file(path: Path) -> None:
@@ -214,6 +217,9 @@ class KCXDocumentorHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/build-docx":
                 self.send_json(build_docx(body, bearer_token=self.bearer_token()))
+                return
+            if parsed.path == "/api/report-page-count":
+                self.send_json(report_page_count(body, bearer_token=self.bearer_token()))
                 return
             if parsed.path == "/api/qa-docx":
                 self.send_json(qa_docx(body))
@@ -643,12 +649,36 @@ def build_docx(body: dict[str, Any], bearer_token: str = "") -> dict[str, Any]:
         response["docxSizeBytes"] = output.stat().st_size
         page_count = estimate_docx_page_count(output)
         response["pageCount"] = page_count
-        generation_report = read_json_if_exists(draft_path.parent / "generation_report.json")
+        generation_report_path = draft_path.parent / "generation_report.json"
+        generation_report = write_generation_report_page_count(generation_report_path, page_count)
+        update_usage_page_count(session_dir.name, page_count, generation_run_id=generation_report.get("generationRunId"))
         if remote_api_base_url() and generation_report and bearer_token:
             response["usageUpdate"] = update_remote_usage_page_count(generation_report, page_count, bearer_token=bearer_token)
         elif remote_api_base_url() and generation_report:
             response["usageUpdateSkipped"] = "Page count reporting requires an authenticated cloud request and does not block local DOCX creation."
     return response
+
+
+def report_page_count(body: dict[str, Any], bearer_token: str = "") -> dict[str, Any]:
+    session_dir = require_session_dir(body.get("sessionId"))
+    docx_path = GENERATED_ROOT / session_dir.name / "user_guide.anthropic.docx"
+    report_path = GENERATED_ROOT / session_dir.name / "generation_report.json"
+    if not docx_path.exists():
+        raise HttpError(HTTPStatus.NOT_FOUND, f"DOCX not found: {relative_to_workspace(docx_path)}")
+    if not report_path.exists():
+        raise HttpError(HTTPStatus.NOT_FOUND, f"Generation report not found: {relative_to_workspace(report_path)}")
+
+    page_count = estimate_docx_page_count(docx_path)
+    generation_report = write_generation_report_page_count(report_path, page_count)
+    update_usage_page_count(session_dir.name, page_count, generation_run_id=generation_report.get("generationRunId"))
+    usage_update = update_remote_usage_page_count(generation_report, page_count, bearer_token=bearer_token)
+    return {
+        "sessionId": session_dir.name,
+        "docx": relative_to_workspace(docx_path),
+        "generationReport": relative_to_workspace(report_path),
+        "pageCount": page_count,
+        "usageUpdate": usage_update,
+    }
 
 
 def qa_docx(body: dict[str, Any]) -> dict[str, Any]:
@@ -880,6 +910,34 @@ def update_remote_usage_page_count(report: dict[str, Any], page_count: int, bear
         "pageCount": page_count,
     }
     return post_remote_usage_records(base_url, [updated_report], bearer_token=bearer_token)
+
+
+def write_generation_report_page_count(report_path: Path, page_count: int) -> dict[str, Any]:
+    report = read_json_if_exists(report_path)
+    if not report:
+        return {}
+    usage = report.get("usage") if isinstance(report.get("usage"), dict) else {}
+    updated_usage = {
+        **usage,
+        "pageCount": page_count,
+        "costPerPageUSD": cost_per_page(
+            usage.get("estimatedCostUSD")
+            or usage.get("estimated_cost_usd")
+            or report.get("estimatedCostUSD")
+            or report.get("estimated_cost_usd"),
+            page_count,
+        ),
+    }
+    updated_report = {
+        **report,
+        "pageCount": page_count,
+        "usage": updated_usage,
+    }
+    report_path.write_text(
+        json.dumps(updated_report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return updated_report
 
 
 def post_remote_usage_records(base_url: str, records: list[dict[str, Any]], timeout_seconds: float = 15.0, bearer_token: str = "") -> dict[str, Any]:
@@ -1375,6 +1433,7 @@ def extract_review_frame(body: dict[str, Any]) -> dict[str, Any]:
     session_dir = require_session_dir(body.get("sessionId"))
     timestamp_seconds = parse_timestamp_value(body.get("timestampSeconds", body.get("timestamp")))
     frame_id = optional_frame_id(body.get("frameId")) or next_review_frame_id(session_dir)
+    assigned_segment_id = optional_segment_id(body.get("segmentId") or body.get("assignedSegmentId"))
     if (session_dir / "frames" / "candidates" / f"{frame_id}.png").exists():
         raise HttpError(HTTPStatus.CONFLICT, f"Frame already exists: {frame_id}")
 
@@ -1397,6 +1456,7 @@ def extract_review_frame(body: dict[str, Any]) -> dict[str, Any]:
         raise HttpError(HTTPStatus.INTERNAL_SERVER_ERROR, result["stderr"] or f"ffmpeg exited {result['returnCode']}")
 
     frame = build_review_frame_record(session_dir, frame_id, timestamp_seconds, crop_filter)
+    frame = enrich_review_frame_record(session_dir, frame, assigned_segment_id)
     append_frame_score(session_dir, frame)
 
     review = read_frame_review(session_dir)
@@ -1405,7 +1465,7 @@ def extract_review_frame(body: dict[str, Any]) -> dict[str, Any]:
     if entry["status"] not in {"approved", "rejected", "pending"}:
         entry["status"] = "pending"
     entry["note"] = string_value(body.get("note") or body.get("reviewNote"), entry.get("note", ""))
-    entry["assignedSegmentId"] = optional_segment_id(body.get("segmentId") or body.get("assignedSegmentId"))
+    entry["assignedSegmentId"] = assigned_segment_id
     entry["addedByReviewer"] = True
     entry["updatedUtc"] = utc_now()
     save_frame_review(session_dir, review)
@@ -1500,7 +1560,18 @@ def apply_frame_review_to_trace(trace: dict[str, Any], review: dict[str, Any]) -
     if not entries:
         return trace
     merged = json.loads(json.dumps(trace))
-    for segment in merged.get("segments", []):
+    segments = merged.get("segments", []) if isinstance(merged.get("segments"), list) else []
+    segment_lookup = {segment.get("id"): segment for segment in segments if isinstance(segment, dict)}
+    seen_by_segment = {
+        segment.get("id"): {
+            image.get("frameId")
+            for image in segment.get("candidateImages", [])
+            if isinstance(image, dict) and image.get("frameId")
+        }
+        for segment in segments
+        if isinstance(segment, dict)
+    }
+    for segment in segments:
         if not isinstance(segment, dict):
             continue
         for image in segment.get("candidateImages", []):
@@ -1512,7 +1583,64 @@ def apply_frame_review_to_trace(trace: dict[str, Any], review: dict[str, Any]) -
             image["reviewStatus"] = entry.get("status", image.get("reviewStatus", "pending"))
             image["reviewNote"] = entry.get("note", "")
             image["assignedSegmentId"] = entry.get("assignedSegmentId")
+
+    frame_lookup = load_frame_score_lookup(session_dir_from_trace(merged))
+    for frame_id, entry in entries.items():
+        if not isinstance(entry, dict):
+            continue
+        assigned_segment_id = entry.get("assignedSegmentId")
+        if not assigned_segment_id or assigned_segment_id not in segment_lookup:
+            continue
+        if frame_id in seen_by_segment.get(assigned_segment_id, set()):
+            continue
+        frame = frame_lookup.get(frame_id)
+        if not frame:
+            continue
+        image = frame_score_to_candidate_image(frame)
+        image["reviewStatus"] = entry.get("status", image.get("reviewStatus", "pending"))
+        image["reviewNote"] = entry.get("note", "")
+        image["assignedSegmentId"] = assigned_segment_id
+        image["addedByReviewer"] = bool(entry.get("addedByReviewer", image.get("addedByReviewer", False)))
+        segment_lookup[assigned_segment_id].setdefault("candidateImages", []).append(image)
+        seen_by_segment.setdefault(assigned_segment_id, set()).add(frame_id)
     return merged
+
+
+def session_dir_from_trace(trace: dict[str, Any]) -> Path:
+    session_id = str(trace.get("sessionId") or "")
+    if session_id and SESSION_ID_RE.fullmatch(session_id):
+        return PROCESSED_ROOT / session_id
+    return PROCESSED_ROOT
+
+
+def load_frame_score_lookup(session_dir: Path) -> dict[str, dict[str, Any]]:
+    payload = read_json_if_exists(session_dir / "frame_scores.json")
+    frames = payload.get("frames") if isinstance(payload.get("frames"), list) else []
+    return {frame.get("id"): frame for frame in frames if isinstance(frame, dict) and frame.get("id")}
+
+
+def frame_score_to_candidate_image(frame: dict[str, Any]) -> dict[str, Any]:
+    quality = frame.get("qualitySignals") if isinstance(frame.get("qualitySignals"), dict) else {}
+    image = {
+        "frameId": frame.get("id", ""),
+        "path": frame.get("path"),
+        "webPath": frame.get("webPath") or frame.get("path"),
+        "timestamp": frame.get("timestamp", ""),
+        "timestampSeconds": frame.get("timestampSeconds", 0),
+        "score": frame.get("score", 0),
+        "confidence": frame.get("confidence", frame.get("score", 0)),
+        "visualQualityScore": frame.get("visualQualityScore", quality.get("qualityScore")),
+        "blurState": frame.get("blurState", quality.get("blurState")),
+        "dedupeState": frame.get("dedupeState", quality.get("dedupeState")),
+        "duplicateOfFrameId": frame.get("duplicateOfFrameId", quality.get("duplicateOfFrameId")),
+        "created": frame.get("created", False),
+        "reason": frame.get("reason") or frame.get("selectionReason", "Added during frame review."),
+        "reviewStatus": "pending",
+    }
+    for key in REVIEW_FRAME_EVIDENCE_KEYS:
+        if key in frame:
+            image[key] = frame.get(key)
+    return image
 
 
 def ensure_review_entry(review: dict[str, Any], frame_id: str) -> dict[str, Any]:
@@ -1558,6 +1686,188 @@ def append_frame_score(session_dir: Path, frame: dict[str, Any]) -> None:
     frames.append(frame)
     frames.sort(key=lambda item: item.get("timestampSeconds", 0) if isinstance(item, dict) else 0)
     write_json_file(path, frame_scores)
+
+
+def enrich_review_frame_record(session_dir: Path, frame: dict[str, Any], assigned_segment_id: str | None) -> dict[str, Any]:
+    processor = load_process_recording_module()
+    if not processor:
+        return frame
+
+    enriched = dict(frame)
+    visual = processor.evaluate_frame_visual_quality(enriched, session_dir)
+    duplicate_of = nearest_existing_duplicate(processor, session_dir, str(visual.get("averageHash") or ""))
+    visual["dedupeState"] = "near-duplicate" if duplicate_of else "unique"
+    visual["duplicateOfFrameId"] = duplicate_of
+    enriched["qualitySignals"] = {
+        "createdImage": True,
+        "sampleIntervalSeconds": None,
+        **visual,
+    }
+    enriched["selectionReason"] = processor.frame_selection_reason(visual, duplicate_of)
+    enriched["score"] = processor.clamp01(0.68 + (float(visual.get("qualityScore") or 0) * 0.24) - (0.12 if duplicate_of else 0.0))
+
+    trace = read_json_if_exists(session_dir / "procedure_trace.json")
+    target_application = (
+        trace.get("recording", {}).get("targetApplication")
+        if isinstance(trace.get("recording"), dict)
+        else None
+    ) or "Unknown"
+    segment = segment_context_for_review_frame(trace, assigned_segment_id, enriched)
+    ocr_frame = ocr_review_frame(processor, session_dir, enriched, target_application)
+    append_ocr_frame(session_dir, ocr_frame)
+
+    candidate = processor.build_candidate_image(enriched, ocr_frame, segment, str(target_application))
+    candidate = processor.assign_frame_recommendation_groups([candidate])[0]
+    for key in REVIEW_FRAME_EVIDENCE_KEYS:
+        if key in candidate:
+            enriched[key] = candidate.get(key)
+    enriched["manualReviewEnriched"] = True
+    enriched["manualReviewEnrichedUtc"] = utc_now()
+    return enriched
+
+
+REVIEW_FRAME_EVIDENCE_KEYS = (
+    "confidence",
+    "frameEvidenceScore",
+    "ocrConfidence",
+    "ocrRelevanceScore",
+    "ocrNonApplication",
+    "ocrSupportingTool",
+    "ocrClass",
+    "ocrClassConfidence",
+    "appOcrScore",
+    "appTermHits",
+    "supportingToolHits",
+    "nonApplicationHits",
+    "ocrTokenCount",
+    "supportingToolAllowed",
+    "visualQualityScore",
+    "blurState",
+    "dedupeState",
+    "duplicateOfFrameId",
+    "ocrText",
+    "ocrSource",
+    "contentType",
+    "recommendationGroup",
+    "selectionDecision",
+    "recommendationReason",
+    "selectionReasons",
+    "positiveSignals",
+    "penalties",
+    "reason",
+)
+
+
+def load_process_recording_module() -> Any | None:
+    global PROCESS_RECORDING_MODULE
+    if PROCESS_RECORDING_MODULE is not None:
+        return PROCESS_RECORDING_MODULE
+    path = WORKSPACE / "scripts" / "process_recording.py"
+    spec = importlib.util.spec_from_file_location("kcxdocumentor_process_recording", path)
+    if not spec or not spec.loader:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    PROCESS_RECORDING_MODULE = module
+    return module
+
+
+def nearest_existing_duplicate(processor: Any, session_dir: Path, average_hash: str) -> str | None:
+    if not average_hash:
+        return None
+    frame_scores = read_json_if_exists(session_dir / "frame_scores.json")
+    prior_hashes = []
+    for frame in frame_scores.get("frames", []) if isinstance(frame_scores.get("frames"), list) else []:
+        quality = frame.get("qualitySignals") if isinstance(frame.get("qualitySignals"), dict) else {}
+        prior_hash = quality.get("averageHash")
+        if frame.get("id") and prior_hash:
+            prior_hashes.append((str(frame["id"]), str(prior_hash)))
+    return processor.nearest_visual_duplicate(average_hash, prior_hashes)
+
+
+def segment_context_for_review_frame(trace: dict[str, Any], assigned_segment_id: str | None, frame: dict[str, Any]) -> dict[str, Any]:
+    segments = trace.get("segments") if isinstance(trace.get("segments"), list) else []
+    if assigned_segment_id:
+        for segment in segments:
+            if isinstance(segment, dict) and segment.get("id") == assigned_segment_id:
+                return segment_to_processor_context(segment)
+    timestamp = float(frame.get("timestampSeconds") or 0)
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        start = float(segment.get("startSeconds") or 0)
+        end = float(segment.get("endSeconds") or start)
+        if start <= timestamp <= end:
+            return segment_to_processor_context(segment)
+    return {
+        "text": "",
+        "start": frame.get("timestamp", ""),
+        "end": frame.get("timestamp", ""),
+        "startSeconds": timestamp,
+        "endSeconds": timestamp,
+        "confidence": 0.75,
+    }
+
+
+def segment_to_processor_context(segment: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "text": segment.get("speakerText") or segment.get("text") or "",
+        "start": segment.get("start", ""),
+        "end": segment.get("end", ""),
+        "startSeconds": segment.get("startSeconds", 0),
+        "endSeconds": segment.get("endSeconds", 0),
+        "confidence": segment.get("confidence", {}).get("transcript", 0.75) if isinstance(segment.get("confidence"), dict) else 0.75,
+    }
+
+
+def ocr_review_frame(processor: Any, session_dir: Path, frame: dict[str, Any], target_application: str) -> dict[str, Any]:
+    tesseract = shutil.which("tesseract")
+    if not tesseract:
+        return processor.build_placeholder_ocr_frame(frame, target_application, "tesseract not available for manual review frame")
+
+    language = os.environ.get("KCXDOC_OCR_LANGUAGE", "eng")
+    psm = os.environ.get("KCXDOC_OCR_PSM", "6")
+    timeout_seconds = processor.parse_float(os.environ.get("KCXDOC_OCR_TIMEOUT_SECONDS")) or 45.0
+    result = processor.run_tesseract_ocr(
+        tesseract,
+        session_dir / str(frame.get("path") or ""),
+        language=language,
+        psm=str(psm),
+        timeout_seconds=timeout_seconds,
+    )
+    text_blocks = result.get("textBlocks") or []
+    if not text_blocks:
+        return processor.build_placeholder_ocr_frame(frame, target_application, result.get("error") or "no text detected")
+    return {
+        "frameId": frame["id"],
+        "timestampSeconds": frame["timestampSeconds"],
+        "timestamp": frame["timestamp"],
+        "source": "tesseract",
+        "language": language,
+        "pageSegmentationMode": str(psm),
+        "confidence": processor.average_block_confidence(text_blocks),
+        "combinedText": " ".join(block["text"] for block in text_blocks),
+        "textBlocks": text_blocks,
+        "error": None,
+    }
+
+
+def append_ocr_frame(session_dir: Path, ocr_frame: dict[str, Any]) -> None:
+    path = session_dir / "ocr.json"
+    payload = read_json_if_exists(path) or {"schemaVersion": 1, "source": "tesseract", "frames": []}
+    payload.setdefault("schemaVersion", 1)
+    frames = payload.setdefault("frames", [])
+    if not isinstance(frames, list):
+        frames = []
+        payload["frames"] = frames
+    frame_id = ocr_frame.get("frameId")
+    frames[:] = [frame for frame in frames if not isinstance(frame, dict) or frame.get("frameId") != frame_id]
+    frames.append(ocr_frame)
+    frames.sort(key=lambda item: item.get("timestampSeconds", 0) if isinstance(item, dict) else 0)
+    if any(isinstance(frame, dict) and frame.get("source") == "tesseract" for frame in frames):
+        payload["source"] = "tesseract"
+    write_json_file(path, payload)
 
 
 def build_review_frame_record(session_dir: Path, frame_id: str, timestamp_seconds: float, crop_filter: str | None) -> dict[str, Any]:

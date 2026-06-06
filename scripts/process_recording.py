@@ -23,6 +23,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+try:
+    from PIL import Image, ImageChops, ImageStat
+except ImportError:  # pragma: no cover - optional visual scoring dependency
+    Image = None
+    ImageChops = None
+    ImageStat = None
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "samples" / "processed"
@@ -46,6 +53,101 @@ ACTION_WORDS = {
     "search": "search",
 }
 SOURCE_PROFILES = {"standard", "teams-recording"}
+NON_APPLICATION_OCR_PHRASES = {
+    "microsoft teams",
+    "recorded by",
+    "organized by",
+    "organised by",
+    "meeting recording",
+    "industry training sessions",
+    "share screen",
+    "stop sharing",
+    "leave meeting",
+    "turn camera",
+    "turn mic",
+    "participant",
+    "participants",
+    "transcript",
+    "captions",
+}
+APP_SURFACE_OCR_PHRASES = {
+    "blink mock ui",
+    "manoji's pharmacy",
+    "newleaf support",
+    "ga-manojikci.com",
+    "data entry",
+    "dispensing",
+    "packing",
+    "will call",
+    "rx verify",
+    "search for rx",
+    "records returned",
+    "need by",
+    "ship by",
+    "create order",
+    "send request",
+    "process next",
+    "add requests",
+    "transfer back",
+    "transfer in",
+    "claim request",
+    "dispense",
+    "refill request",
+}
+SUPPORTING_TOOL_OCR_PHRASES = {
+    ".json",
+    "notepad",
+    "administrator",
+    "downloads",
+    "c:\\",
+    "blinkmockdata",
+    "request.json",
+    "requests.json",
+    "logs",
+    "notepad++",
+    "file edit search view",
+    "encoding language setting",
+    "tools macro run plugins",
+    "sql server management",
+    "quick launch",
+    ".sql",
+    "update rx date",
+    "local disk",
+}
+SUPPORTING_TOOL_ALLOWED_TERMS = {
+    "backdating",
+    "confluence",
+    "data",
+    "date",
+    "documentation",
+    "json",
+    "log",
+    "logs",
+    "mock",
+    "request json",
+    "testing",
+}
+OCR_STOP_WORDS = {
+    "about",
+    "after",
+    "before",
+    "click",
+    "close",
+    "confirm",
+    "continue",
+    "from",
+    "have",
+    "into",
+    "next",
+    "open",
+    "review",
+    "screen",
+    "select",
+    "show",
+    "that",
+    "this",
+    "with",
+}
 
 
 @dataclass(frozen=True)
@@ -53,6 +155,7 @@ class Tooling:
     ffprobe: str | None
     ffmpeg: str | None
     whisper: str | None
+    tesseract: str | None
 
 
 def main() -> int:
@@ -63,7 +166,7 @@ def main() -> int:
         return 2
 
     output_root = args.output_root.expanduser().resolve()
-    tooling = find_tooling(disabled=args.no_media_tools, whisper_cli=args.whisper_cli)
+    tooling = find_tooling(disabled=args.no_media_tools, whisper_cli=args.whisper_cli, tesseract_cli=args.tesseract_cli)
     session_id = args.session_id or build_session_id(source)
     session_dir = output_root / session_id
 
@@ -96,8 +199,8 @@ def main() -> int:
     )
 
     frames = maybe_extract_frames(source, session_dir, tooling, metadata, args)
-    frame_scores = score_frames(frames, metadata, args.sample_interval_seconds)
-    ocr = build_placeholder_ocr(frame_scores, args.target_application)
+    frame_scores = score_frames(frames, metadata, args.sample_interval_seconds, session_dir=session_dir)
+    ocr = build_ocr(frame_scores, session_dir, tooling, args)
     procedure_trace = build_procedure_trace(
         source=source,
         session_id=session_id,
@@ -119,6 +222,7 @@ def main() -> int:
             "ffprobe": tooling.ffprobe,
             "ffmpeg": tooling.ffmpeg,
             "whisper": tooling.whisper,
+            "tesseract": tooling.tesseract,
             "mediaToolsDisabled": args.no_media_tools,
             "localSttDisabled": args.no_local_stt,
         },
@@ -261,6 +365,27 @@ def parse_args() -> argparse.Namespace:
         help="Skip local Whisper transcription when no sidecar transcript is provided.",
     )
     parser.add_argument(
+        "--tesseract-cli",
+        default=os.environ.get("KCXDOC_TESSERACT_CLI", "").strip() or None,
+        help="Path to Tesseract OCR. Defaults to KCXDOC_TESSERACT_CLI or tesseract on PATH.",
+    )
+    parser.add_argument(
+        "--ocr-language",
+        default=os.environ.get("KCXDOC_OCR_LANGUAGE", "").strip() or "eng",
+        help="Tesseract language pack to use for frame OCR. Defaults to eng.",
+    )
+    parser.add_argument(
+        "--ocr-psm",
+        default=os.environ.get("KCXDOC_OCR_PSM", "").strip() or "11",
+        help="Tesseract page segmentation mode for UI screenshots. Defaults to 11.",
+    )
+    parser.add_argument(
+        "--ocr-timeout-seconds",
+        type=float,
+        default=float(os.environ.get("KCXDOC_OCR_TIMEOUT_SECONDS", "20")),
+        help="Per-frame timeout for local Tesseract OCR.",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Replace an existing session directory with the same id.",
@@ -268,11 +393,17 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def find_tooling(disabled: bool, whisper_cli: str | None = None) -> Tooling:
+def find_tooling(disabled: bool, whisper_cli: str | None = None, tesseract_cli: str | None = None) -> Tooling:
     whisper = str(Path(whisper_cli).expanduser()) if whisper_cli else shutil.which("whisper-cli")
+    tesseract = str(Path(tesseract_cli).expanduser()) if tesseract_cli else shutil.which("tesseract")
     if disabled:
-        return Tooling(ffprobe=None, ffmpeg=None, whisper=whisper)
-    return Tooling(ffprobe=shutil.which("ffprobe"), ffmpeg=shutil.which("ffmpeg"), whisper=whisper)
+        return Tooling(ffprobe=None, ffmpeg=None, whisper=whisper, tesseract=None)
+    return Tooling(
+        ffprobe=shutil.which("ffprobe"),
+        ffmpeg=shutil.which("ffmpeg"),
+        whisper=whisper,
+        tesseract=tesseract,
+    )
 
 
 def build_session_id(source: Path) -> str:
@@ -921,14 +1052,23 @@ def score_frames(
     frames: list[dict[str, Any]],
     metadata: dict[str, Any],
     sample_interval: float,
+    session_dir: Path | None = None,
 ) -> dict[str, Any]:
     scored = []
     duration = max(1.0, metadata["durationSeconds"])
+    prior_hashes: list[tuple[str, str]] = []
     for index, frame in enumerate(frames):
         timestamp = frame["timestampSeconds"]
         position = min(1.0, timestamp / duration)
         cadence_bonus = 0.05 if index % 2 == 0 else 0.0
-        score = round(0.55 + cadence_bonus + (0.15 * (1.0 - abs(0.5 - position))), 3)
+        visual = evaluate_frame_visual_quality(frame, session_dir)
+        duplicate_of = nearest_visual_duplicate(visual.get("averageHash"), prior_hashes)
+        if frame.get("created") and visual.get("averageHash"):
+            prior_hashes.append((frame["id"], str(visual["averageHash"])))
+        visual["dedupeState"] = "near-duplicate" if duplicate_of else "unique"
+        visual["duplicateOfFrameId"] = duplicate_of
+        base_score = 0.55 + cadence_bonus + (0.15 * (1.0 - abs(0.5 - position)))
+        score = clamp01(base_score + visual.get("qualityScore", 0.0) * 0.22 - (0.2 if duplicate_of else 0.0))
         scored.append(
             {
                 **frame,
@@ -936,11 +1076,10 @@ def score_frames(
                 "qualitySignals": {
                     "createdImage": frame["created"],
                     "sampleIntervalSeconds": sample_interval,
-                    "dedupeState": "not-evaluated-in-prototype",
-                    "blurState": "not-evaluated-in-prototype",
+                    **visual,
                 },
                 "selectionReason": (
-                    "Extracted at regular interval for prototype review."
+                    frame_selection_reason(visual, duplicate_of)
                     if frame["created"]
                     else "Virtual candidate retained so downstream trace shape is stable."
                 ),
@@ -953,30 +1092,335 @@ def score_frames(
     }
 
 
-def build_placeholder_ocr(frame_scores: dict[str, Any], target_application: str) -> dict[str, Any]:
+def evaluate_frame_visual_quality(frame: dict[str, Any], session_dir: Path | None) -> dict[str, Any]:
+    if not frame.get("created") or not frame.get("path"):
+        return {
+            "qualityScore": 0.0,
+            "sharpnessScore": 0.0,
+            "exposureScore": 0.0,
+            "blurState": "no-image",
+            "exposureState": "no-image",
+            "averageHash": None,
+            "visualScoringAvailable": bool(Image and ImageStat and ImageChops),
+        }
+    if Image is None or ImageStat is None or ImageChops is None or session_dir is None:
+        return {
+            "qualityScore": 0.5,
+            "sharpnessScore": 0.5,
+            "exposureScore": 0.5,
+            "blurState": "not-evaluated-pillow-unavailable",
+            "exposureState": "not-evaluated-pillow-unavailable",
+            "averageHash": None,
+            "visualScoringAvailable": False,
+        }
+
+    path = session_dir / str(frame["path"])
+    try:
+        with Image.open(path) as image:
+            gray = image.convert("L")
+            sample = gray.resize((96, 54))
+            stat = ImageStat.Stat(sample)
+            mean_luminance = stat.mean[0]
+            histogram = sample.histogram()
+            total_pixels = sum(histogram) or 1
+            dark_ratio = sum(histogram[:35]) / total_pixels
+            bright_ratio = sum(histogram[235:]) / total_pixels
+            sharpness = frame_sharpness_score(sample)
+            laplacian_variance = frame_laplacian_variance(sample)
+            exposure = exposure_score(mean_luminance, dark_ratio, bright_ratio)
+            avg_hash = average_hash(gray)
+    except Exception as exc:
+        return {
+            "qualityScore": 0.0,
+            "sharpnessScore": 0.0,
+            "exposureScore": 0.0,
+            "blurState": "image-read-error",
+            "exposureState": "image-read-error",
+            "averageHash": None,
+            "visualScoringAvailable": True,
+            "visualScoringError": str(exc),
+        }
+
+    quality = clamp01((sharpness * 0.58) + (exposure * 0.42))
+    return {
+        "qualityScore": quality,
+        "laplacianVariance": round(laplacian_variance, 3),
+        "sharpnessScore": sharpness,
+        "exposureScore": exposure,
+        "blurState": "sharp" if sharpness >= 0.55 else "soft" if sharpness >= 0.32 else "blurry",
+        "exposureState": "usable" if exposure >= 0.58 else "low-contrast-or-extreme",
+        "meanLuminance": round(mean_luminance, 3),
+        "darkRatio": round(dark_ratio, 3),
+        "brightRatio": round(bright_ratio, 3),
+        "averageHash": avg_hash,
+        "visualScoringAvailable": True,
+    }
+
+
+def frame_sharpness_score(gray_sample: Any) -> float:
+    shifted_x = ImageChops.offset(gray_sample, 1, 0)
+    shifted_y = ImageChops.offset(gray_sample, 0, 1)
+    diff_x = ImageChops.difference(gray_sample, shifted_x)
+    diff_y = ImageChops.difference(gray_sample, shifted_y)
+    mean_diff = (ImageStat.Stat(diff_x).mean[0] + ImageStat.Stat(diff_y).mean[0]) / 2
+    return clamp01(mean_diff / 18.0)
+
+
+def frame_laplacian_variance(gray_sample: Any) -> float:
+    width, height = gray_sample.size
+    pixels = gray_sample.load()
+    values = []
+    for y in range(1, height - 1):
+        for x in range(1, width - 1):
+            value = (
+                4 * pixels[x, y]
+                - pixels[x - 1, y]
+                - pixels[x + 1, y]
+                - pixels[x, y - 1]
+                - pixels[x, y + 1]
+            )
+            values.append(value)
+    if not values:
+        return 0.0
+    mean = sum(values) / len(values)
+    return sum((value - mean) ** 2 for value in values) / len(values)
+
+
+def exposure_score(mean_luminance: float, dark_ratio: float, bright_ratio: float) -> float:
+    mean_balance = 1.0 - min(1.0, abs(mean_luminance - 128.0) / 128.0)
+    extreme_penalty = min(0.65, (dark_ratio + bright_ratio) * 0.7)
+    return clamp01(mean_balance - extreme_penalty + 0.22)
+
+
+def average_hash(gray_image: Any) -> str:
+    small = gray_image.resize((8, 8))
+    values = list(small.get_flattened_data() if hasattr(small, "get_flattened_data") else small.getdata())
+    avg = sum(values) / len(values)
+    bits = ["1" if value >= avg else "0" for value in values]
+    return "".join(f"{int(''.join(bits[i:i + 4]), 2):x}" for i in range(0, len(bits), 4))
+
+
+def nearest_visual_duplicate(current_hash: Any, prior_hashes: list[tuple[str, str]], threshold: int = 2) -> str | None:
+    if not current_hash:
+        return None
+    current = str(current_hash)
+    for frame_id, prior_hash in reversed(prior_hashes[-12:]):
+        if hamming_distance_hex(current, prior_hash) <= threshold:
+            return frame_id
+    return None
+
+
+def hamming_distance_hex(left: str, right: str) -> int:
+    try:
+        left_int = int(left, 16)
+        right_int = int(right, 16)
+    except ValueError:
+        return 64
+    return (left_int ^ right_int).bit_count()
+
+
+def frame_selection_reason(visual: dict[str, Any], duplicate_of: str | None) -> str:
+    reason = (
+        "Extracted at regular interval with local visual quality scoring "
+        f"(sharpness {visual.get('sharpnessScore', 0):.2f}, exposure {visual.get('exposureScore', 0):.2f})."
+    )
+    if duplicate_of:
+        reason += f" Penalized as visually similar to {duplicate_of}."
+    if visual.get("blurState") == "blurry":
+        reason += " Review because the frame appears blurry."
+    if visual.get("exposureState") == "low-contrast-or-extreme":
+        reason += " Review because the frame has low contrast or extreme exposure."
+    return reason
+
+
+def build_ocr(
+    frame_scores: dict[str, Any],
+    session_dir: Path,
+    tooling: Tooling,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    if not tooling.tesseract:
+        return build_placeholder_ocr(
+            frame_scores,
+            args.target_application,
+            reason="tesseract not available",
+        )
+
     frames = []
+    real_frame_count = 0
     for frame in frame_scores["frames"]:
-        frames.append(
+        frame_path = frame.get("path")
+        if not frame.get("created") or not frame_path:
+            frames.append(build_placeholder_ocr_frame(frame, args.target_application, "frame image not available"))
+            continue
+
+        image_path = session_dir / frame_path
+        result = run_tesseract_ocr(
+            tooling.tesseract,
+            image_path,
+            language=args.ocr_language,
+            psm=str(args.ocr_psm),
+            timeout_seconds=args.ocr_timeout_seconds,
+        )
+        text_blocks = result["textBlocks"]
+        if text_blocks:
+            real_frame_count += 1
+            frames.append(
+                {
+                    "frameId": frame["id"],
+                    "timestampSeconds": frame["timestampSeconds"],
+                    "timestamp": frame["timestamp"],
+                    "source": "tesseract",
+                    "language": args.ocr_language,
+                    "pageSegmentationMode": str(args.ocr_psm),
+                    "confidence": average_block_confidence(text_blocks),
+                    "combinedText": " ".join(block["text"] for block in text_blocks),
+                    "textBlocks": text_blocks,
+                    "error": None,
+                }
+            )
+        else:
+            frames.append(build_placeholder_ocr_frame(frame, args.target_application, result["error"] or "no text detected"))
+
+    return {
+        "schemaVersion": 1,
+        "source": "tesseract" if real_frame_count else "prototype-placeholder",
+        "frames": frames,
+    }
+
+
+def run_tesseract_ocr(
+    tesseract: str,
+    image_path: Path,
+    language: str,
+    psm: str,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    cmd = [
+        tesseract,
+        str(image_path),
+        "stdout",
+        "-l",
+        language,
+        "--psm",
+        psm,
+        "tsv",
+    ]
+    command = run_command(cmd, timeout_seconds=timeout_seconds)
+    if command["returnCode"] != 0:
+        return {"textBlocks": [], "error": command["stderr"] or f"tesseract exited {command['returnCode']}"}
+    return {
+        "textBlocks": parse_tesseract_tsv(command["stdout"]),
+        "error": None,
+    }
+
+
+def parse_tesseract_tsv(raw_tsv: str) -> list[dict[str, Any]]:
+    lines = [line for line in raw_tsv.splitlines() if line.strip()]
+    if not lines:
+        return []
+
+    headers = lines[0].split("\t")
+    rows = []
+    for line in lines[1:]:
+        values = line.split("\t")
+        if len(values) < len(headers):
+            values.extend([""] * (len(headers) - len(values)))
+        rows.append(dict(zip(headers, values)))
+
+    grouped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        text = str(row.get("text", "")).strip()
+        confidence = parse_float(row.get("conf"))
+        if not text or confidence is None or confidence < 0:
+            continue
+
+        key = (
+            str(row.get("block_num", "")),
+            str(row.get("par_num", "")),
+            str(row.get("line_num", "")),
+            str(row.get("page_num", "")),
+        )
+        left = int(parse_float(row.get("left")) or 0)
+        top = int(parse_float(row.get("top")) or 0)
+        width = int(parse_float(row.get("width")) or 0)
+        height = int(parse_float(row.get("height")) or 0)
+        bounds = {"left": left, "top": top, "width": width, "height": height}
+        group = grouped.setdefault(
+            key,
             {
-                "frameId": frame["id"],
-                "timestampSeconds": frame["timestampSeconds"],
-                "timestamp": frame["timestamp"],
-                "source": "prototype-placeholder",
-                "textBlocks": [
-                    {
-                        "text": target_application,
-                        "confidence": 0.0,
-                        "bounds": None,
-                    },
-                    {
-                        "text": "Visible UI text pending local OCR",
-                        "confidence": 0.0,
-                        "bounds": None,
-                    },
-                ],
+                "parts": [],
+                "confidences": [],
+                "bounds": bounds,
+            },
+        )
+        group["parts"].append(text)
+        group["confidences"].append(confidence)
+        group["bounds"] = merge_bounds(group["bounds"], bounds)
+
+    blocks = []
+    for group in grouped.values():
+        text = normalize_ocr_text(" ".join(group["parts"]))
+        if not text:
+            continue
+        blocks.append(
+            {
+                "text": text,
+                "confidence": round(sum(group["confidences"]) / len(group["confidences"]) / 100, 3),
+                "bounds": group["bounds"],
             }
         )
+    return blocks
+
+
+def merge_bounds(left_bounds: dict[str, int], right_bounds: dict[str, int]) -> dict[str, int]:
+    left = min(left_bounds["left"], right_bounds["left"])
+    top = min(left_bounds["top"], right_bounds["top"])
+    right = max(left_bounds["left"] + left_bounds["width"], right_bounds["left"] + right_bounds["width"])
+    bottom = max(left_bounds["top"] + left_bounds["height"], right_bounds["top"] + right_bounds["height"])
+    return {"left": left, "top": top, "width": right - left, "height": bottom - top}
+
+
+def normalize_ocr_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def average_block_confidence(text_blocks: list[dict[str, Any]]) -> float:
+    confidences = [parse_confidence(block.get("confidence")) for block in text_blocks]
+    if not confidences:
+        return 0.0
+    return round(sum(confidences) / len(confidences), 3)
+
+
+def build_placeholder_ocr(frame_scores: dict[str, Any], target_application: str, reason: str | None = None) -> dict[str, Any]:
+    frames = []
+    for frame in frame_scores["frames"]:
+        frames.append(build_placeholder_ocr_frame(frame, target_application, reason))
     return {"schemaVersion": 1, "source": "prototype-placeholder", "frames": frames}
+
+
+def build_placeholder_ocr_frame(frame: dict[str, Any], target_application: str, reason: str | None = None) -> dict[str, Any]:
+    return {
+        "frameId": frame["id"],
+        "timestampSeconds": frame["timestampSeconds"],
+        "timestamp": frame["timestamp"],
+        "source": "prototype-placeholder",
+        "confidence": 0.0,
+        "combinedText": target_application,
+        "textBlocks": [
+            {
+                "text": target_application,
+                "confidence": 0.0,
+                "bounds": None,
+            },
+            {
+                "text": "Visible UI text pending local OCR",
+                "confidence": 0.0,
+                "bounds": None,
+            },
+        ],
+        "error": reason,
+    }
 
 
 def build_procedure_trace(
@@ -1000,14 +1444,32 @@ def build_procedure_trace(
             end=segment["endSeconds"],
             limit=3,
         )
+        candidate_ocr_frames = [ocr_lookup.get(frame["id"], {}) for frame in candidate_frames]
+        usable_ocr_frames = [
+            ocr_frame
+            for ocr_frame in candidate_ocr_frames
+            if ocr_frame.get("source") != "prototype-placeholder"
+            and not is_non_application_ocr_text(str(ocr_frame.get("combinedText") or ""))
+            and not (
+                is_supporting_tool_ocr_text(str(ocr_frame.get("combinedText") or ""))
+                and not segment_allows_supporting_tool(str(segment.get("text") or ""))
+            )
+        ]
         visible_text = sorted(
             {
                 block["text"]
-                for frame in candidate_frames
-                for block in ocr_lookup.get(frame["id"], {}).get("textBlocks", [])
+                for ocr_frame in usable_ocr_frames
+                for block in ocr_frame.get("textBlocks", [])
                 if block.get("text")
             }
         )
+        candidate_images = [
+            build_candidate_image(frame, ocr_lookup.get(frame["id"], {}), segment, target_application)
+            for frame in candidate_frames
+        ]
+        candidate_images = assign_frame_recommendation_groups(candidate_images)
+        confidence = build_segment_confidence(segment, candidate_frames, candidate_ocr_frames, candidate_images)
+        quality = build_segment_quality(segment, confidence, candidate_images, visible_text)
         segments.append(
             {
                 "id": f"seg-{index + 1:04d}",
@@ -1018,50 +1480,45 @@ def build_procedure_trace(
                 "speakerText": segment["text"],
                 "visibleUiText": visible_text,
                 "actionHints": infer_action_hints(segment["text"]),
-                "candidateImages": [
-                    {
-                        "frameId": frame["id"],
-                        "path": frame["path"],
-                        "webPath": frame.get("webPath") or frame["path"],
-                        "timestamp": frame["timestamp"],
-                        "timestampSeconds": frame["timestampSeconds"],
-                        "score": frame["score"],
-                        "confidence": frame["score"] if frame["created"] else 0.25,
-                        "created": frame["created"],
-                        "reason": frame["selectionReason"],
-                        "reviewStatus": "pending",
-                    }
-                    for frame in candidate_frames
-                ],
-                "confidence": build_segment_confidence(segment, candidate_frames, visible_text),
+                "candidateImages": candidate_images,
+                "confidence": confidence,
+                "qualityLabel": quality["qualityLabel"],
+                "qualityLabels": quality["qualityLabels"],
+                "reviewPriority": quality["reviewPriority"],
+                "screenshotGap": quality["screenshotGap"],
+                "frameReviewSummary": build_frame_review_summary(candidate_images),
                 "notes": [
-                    "Prototype segment generated before local STT/OCR are wired in."
+                    "Prototype segment generated before local STT is wired in."
                     if segment["source"] == "deterministic-placeholder"
                     else "Segment derived from sidecar transcript."
                 ],
             }
         )
 
+    content_classification = detect_recording_content_type(segments, transcript)
     return {
         "schemaVersion": 1,
         "sessionId": session_id,
+        "contentClassification": content_classification,
         "recording": {
             "sourceFile": str(source),
             "sourceName": source.name,
             "durationSeconds": metadata["durationSeconds"],
             "targetApplication": target_application,
+            "contentType": content_classification["type"],
             "captureMode": "imported-recording",
             "audio": extracted_audio,
             "transcript": transcript.get("sourceTranscript"),
         },
         "segments": segments,
+        "screenshotGapTasks": build_screenshot_gap_tasks(segments),
         "downstreamUse": {
             "intendedConsumer": "AI guide draft generator",
             "tokenStrategy": "Send trace JSON plus only selected candidate images, not source video.",
             "prototypeLimitations": [
                 "Transcript may be placeholder text unless --transcript is provided.",
-                "OCR is placeholder-only in this lane.",
-                "Frame scoring is deterministic interval scoring, not CV-based ranking yet.",
+                "OCR requires local Tesseract and extracted frame images; missing OCR stays reviewable.",
+                "Frame scoring uses local OCR and visual quality heuristics; reviewers should still approve screenshots before publication.",
             ],
         },
     }
@@ -1070,17 +1527,32 @@ def build_procedure_trace(
 def build_segment_confidence(
     segment: dict[str, Any],
     candidate_frames: list[dict[str, Any]],
-    visible_text: list[str],
+    candidate_ocr_frames: list[dict[str, Any]],
+    candidate_images: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     transcript_confidence = segment["confidence"] if segment["confidence"] is not None else 0.25
-    frame_confidence = max((frame["score"] if frame["created"] else 0.25 for frame in candidate_frames), default=0.0)
-    ocr_confidence = 0.25 if visible_text else 0.0
+    frame_confidence = max(
+        (
+            parse_confidence(image.get("frameEvidenceScore"))
+            for image in candidate_images or []
+            if image.get("created")
+        ),
+        default=max((frame["score"] if frame["created"] else 0.25 for frame in candidate_frames), default=0.0),
+    )
+    ocr_confidence = max(
+        (
+            parse_confidence(ocr_frame.get("confidence"))
+            for ocr_frame in candidate_ocr_frames
+            if ocr_frame.get("source") != "prototype-placeholder"
+        ),
+        default=0.0,
+    )
     overall = round((transcript_confidence * 0.5) + (ocr_confidence * 0.25) + (frame_confidence * 0.25), 3)
     reasons = []
     if transcript_confidence < 0.7:
         reasons.append("Transcript confidence is below publication threshold.")
     if ocr_confidence < 0.7:
-        reasons.append("OCR confidence is below publication threshold or placeholder-only.")
+        reasons.append("OCR confidence is below publication threshold or unavailable.")
     if frame_confidence < 0.7:
         reasons.append("Frame selection confidence is below publication threshold.")
     return {
@@ -1091,6 +1563,426 @@ def build_segment_confidence(
         "needsHumanReview": overall < 0.75,
         "reasons": reasons,
     }
+
+
+def build_segment_quality(
+    segment: dict[str, Any],
+    confidence: dict[str, Any],
+    candidate_images: list[dict[str, Any]],
+    visible_text: list[str],
+) -> dict[str, Any]:
+    labels: list[dict[str, str]] = []
+    transcript_confidence = float(confidence.get("transcript") or 0)
+    ocr_confidence = float(confidence.get("ocr") or 0)
+    frame_confidence = float(confidence.get("frameSelection") or 0)
+    has_recommended = any(image.get("recommendationGroup") == "recommended" for image in candidate_images)
+    has_application = any(image.get("ocrClass") == "application" for image in candidate_images)
+
+    if transcript_confidence < 0.7:
+        labels.append({"id": "low-transcript-confidence", "label": "Low transcript confidence", "severity": "warn"})
+    if ocr_confidence < 0.7 or not visible_text:
+        labels.append({"id": "weak-ocr-match", "label": "Weak OCR evidence", "severity": "warn"})
+    if frame_confidence < 0.7:
+        labels.append({"id": "low-frame-confidence", "label": "Weak screenshot confidence", "severity": "warn"})
+    if any(image.get("blurState") == "blurry" for image in candidate_images):
+        labels.append({"id": "blurry-frame", "label": "Blurry frame available", "severity": "warn"})
+    if any(image.get("dedupeState") == "near-duplicate" for image in candidate_images):
+        labels.append({"id": "duplicate-frame", "label": "Near-duplicate frame", "severity": "info"})
+    if any(image.get("ocrSupportingTool") and not image.get("supportingToolAllowed") for image in candidate_images):
+        labels.append({"id": "supporting-tool-frame", "label": "Supporting-tool frame", "severity": "warn"})
+    if any(image.get("ocrNonApplication") for image in candidate_images):
+        labels.append({"id": "non-application-frame", "label": "Non-application frame", "severity": "warn"})
+    if not has_recommended:
+        labels.append({"id": "missing-recommended-screenshot", "label": "Needs better screenshot", "severity": "bad"})
+    elif has_application:
+        labels.append({"id": "good-app-evidence", "label": "Application evidence found", "severity": "good"})
+
+    review_priority = "low"
+    if not has_recommended or (transcript_confidence < 0.7 and ocr_confidence < 0.7):
+        review_priority = "high"
+    elif confidence.get("needsHumanReview") or any(label["severity"] == "warn" for label in labels):
+        review_priority = "medium"
+
+    quality_label = "publishable"
+    if review_priority == "high":
+        quality_label = "needs-review"
+    elif review_priority == "medium":
+        quality_label = "review"
+
+    return {
+        "qualityLabel": quality_label,
+        "qualityLabels": labels,
+        "reviewPriority": review_priority,
+        "screenshotGap": build_segment_screenshot_gap(segment, candidate_images),
+    }
+
+
+def build_segment_screenshot_gap(segment: dict[str, Any], candidate_images: list[dict[str, Any]]) -> dict[str, Any]:
+    recommended = [image for image in candidate_images if image.get("recommendationGroup") == "recommended"]
+    if recommended:
+        return {"needsBetterScreenshot": False, "recommendedFrameIds": [image.get("frameId") for image in recommended if image.get("frameId")]}
+
+    reasons = []
+    if not candidate_images:
+        reasons.append("No candidate screenshot was found for this segment.")
+    if any(image.get("ocrNonApplication") for image in candidate_images):
+        reasons.append("Available frames appear to show meeting or title-card content.")
+    if any(image.get("ocrSupportingTool") and not image.get("supportingToolAllowed") for image in candidate_images):
+        reasons.append("Available frames appear to show a supporting tool instead of the target application.")
+    if any(image.get("blurState") == "blurry" for image in candidate_images):
+        reasons.append("Available frames include blurry screenshots.")
+    if not reasons:
+        reasons.append("Available frames do not have enough application evidence.")
+    return {
+        "needsBetterScreenshot": True,
+        "recommendedWindow": {
+            "start": segment.get("start", ""),
+            "end": segment.get("end", ""),
+            "startSeconds": segment.get("startSeconds", 0),
+            "endSeconds": segment.get("endSeconds", 0),
+        },
+        "reasons": reasons,
+        "message": "Capture or approve a clearer application screenshot for this segment.",
+    }
+
+
+def build_frame_review_summary(candidate_images: list[dict[str, Any]]) -> dict[str, Any]:
+    groups = {"recommended": 0, "alternate": 0, "system-rejected": 0}
+    recommended_ids = []
+    for image in candidate_images:
+        group = str(image.get("recommendationGroup") or "alternate")
+        if group not in groups:
+            group = "alternate"
+        groups[group] += 1
+        if group == "recommended" and image.get("frameId"):
+            recommended_ids.append(image["frameId"])
+    return {
+        "recommendedFrameIds": recommended_ids,
+        "recommended": groups["recommended"],
+        "alternate": groups["alternate"],
+        "systemRejected": groups["system-rejected"],
+    }
+
+
+def build_screenshot_gap_tasks(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    tasks = []
+    for segment in segments:
+        gap = segment.get("screenshotGap") if isinstance(segment.get("screenshotGap"), dict) else {}
+        if not gap.get("needsBetterScreenshot"):
+            continue
+        tasks.append(
+            {
+                "type": "screenshot-gap",
+                "sourceSegmentId": segment.get("id", ""),
+                "severity": "high" if segment.get("reviewPriority") == "high" else "medium",
+                "recommendedWindow": gap.get("recommendedWindow", {}),
+                "description": gap.get("message", "Capture a clearer application screenshot for this segment."),
+                "reasons": gap.get("reasons", []),
+            }
+        )
+    return tasks
+
+
+def detect_recording_content_type(segments: list[dict[str, Any]], transcript: dict[str, Any]) -> dict[str, Any]:
+    images = [
+        image
+        for segment in segments
+        for image in segment.get("candidateImages", [])
+        if isinstance(image, dict)
+    ]
+    segment_count = max(1, len(segments))
+    image_count = max(1, len(images))
+    application_ratio = sum(1 for image in images if image.get("ocrClass") == "application") / image_count
+    supporting_ratio = sum(1 for image in images if image.get("ocrSupportingTool")) / image_count
+    non_application_ratio = sum(1 for image in images if image.get("ocrNonApplication")) / image_count
+    action_ratio = sum(1 for segment in segments if segment.get("actionHints")) / segment_count
+    transcript_text = " ".join(str(segment.get("speakerText") or "") for segment in segments).lower()
+    slide_terms = ("slide", "agenda", "overview", "training", "presentation", "deck")
+    slide_signal = sum(1 for term in slide_terms if term in transcript_text) / len(slide_terms)
+
+    if application_ratio >= 0.45 and action_ratio >= 0.35:
+        content_type = "application-workflow"
+        confidence = min(0.95, 0.55 + (application_ratio * 0.25) + (action_ratio * 0.2))
+    elif application_ratio >= 0.25 and (supporting_ratio >= 0.2 or slide_signal >= 0.25):
+        content_type = "mixed-workflow-training"
+        confidence = min(0.9, 0.5 + (application_ratio * 0.2) + (supporting_ratio * 0.2) + (slide_signal * 0.2))
+    elif slide_signal >= 0.35 or supporting_ratio >= 0.45:
+        content_type = "slide-reference-training"
+        confidence = min(0.85, 0.45 + (supporting_ratio * 0.25) + (slide_signal * 0.3))
+    elif non_application_ratio >= 0.55 and action_ratio < 0.2:
+        content_type = "conversation-or-meeting"
+        confidence = min(0.85, 0.45 + (non_application_ratio * 0.35))
+    else:
+        content_type = "unknown"
+        confidence = 0.35
+
+    return {
+        "type": content_type,
+        "confidence": clamp01(confidence),
+        "signals": {
+            "applicationFrameRatio": round(application_ratio, 3),
+            "supportingToolFrameRatio": round(supporting_ratio, 3),
+            "nonApplicationFrameRatio": round(non_application_ratio, 3),
+            "actionSegmentRatio": round(action_ratio, 3),
+            "slideTrainingSignal": round(slide_signal, 3),
+            "transcriptSource": transcript.get("source", ""),
+        },
+    }
+
+
+def build_candidate_image(
+    frame: dict[str, Any],
+    ocr_frame: dict[str, Any],
+    segment: dict[str, Any],
+    target_application: str,
+) -> dict[str, Any]:
+    ocr_text = str(ocr_frame.get("combinedText") or "")
+    ocr_confidence = parse_confidence(ocr_frame.get("confidence")) if ocr_frame else 0.0
+    frame_score = parse_confidence(frame.get("score")) if frame.get("created") else 0.25
+    quality_signals = frame.get("qualitySignals") if isinstance(frame.get("qualitySignals"), dict) else {}
+    visual_quality = parse_confidence(quality_signals.get("qualityScore")) if quality_signals else 0.5
+    duplicate = quality_signals.get("dedupeState") == "near-duplicate"
+    blurry = quality_signals.get("blurState") == "blurry"
+    relevance = ocr_relevance_score(
+        " ".join(
+            [
+                str(segment.get("text") or ""),
+                target_application,
+                " ".join(infer_action_hints(str(segment.get("text") or ""))),
+            ]
+        ),
+        ocr_text,
+    )
+    ocr_class = classify_ocr_surface(ocr_text)
+    non_application = ocr_class["ocrClass"] == "non-application"
+    supporting_tool = ocr_class["ocrClass"] == "supporting-tool"
+    supporting_tool_allowed = segment_allows_supporting_tool(str(segment.get("text") or ""))
+    penalty = 0.55 if non_application else 0.0
+    if supporting_tool and not supporting_tool_allowed:
+        penalty += 0.35
+    if duplicate:
+        penalty += 0.18
+    if blurry:
+        penalty += 0.16
+    evidence_score = clamp01((frame_score * 0.24) + (visual_quality * 0.18) + (ocr_confidence * 0.2) + (relevance * 0.58) - penalty)
+    if non_application:
+        evidence_score = min(evidence_score, 0.34)
+    if ocr_class["ocrClass"] == "application":
+        evidence_score = clamp01(evidence_score + min(0.18, ocr_class["appOcrScore"] * 0.18))
+    if supporting_tool and not supporting_tool_allowed:
+        evidence_score = min(evidence_score, 0.46)
+    reason = frame["selectionReason"]
+    if ocr_text:
+        reason = (
+            f"{reason} OCR evidence score {evidence_score:.2f}; "
+            f"term overlap {relevance:.2f}; OCR confidence {ocr_confidence:.2f}."
+        )
+        if non_application:
+            reason += " Penalized because OCR indicates Teams, meeting, or title-card content."
+        if supporting_tool and not supporting_tool_allowed:
+            reason += " Penalized because OCR indicates a supporting tool rather than the application workflow."
+        if duplicate:
+            reason += f" Penalized because it is visually similar to {quality_signals.get('duplicateOfFrameId')}."
+        if blurry:
+            reason += " Penalized because local visual scoring marked it as blurry."
+    return {
+        "frameId": frame["id"],
+        "path": frame["path"],
+        "webPath": frame.get("webPath") or frame["path"],
+        "timestamp": frame["timestamp"],
+        "timestampSeconds": frame["timestampSeconds"],
+        "score": frame_score,
+        "confidence": evidence_score if frame.get("created") else 0.25,
+        "frameEvidenceScore": evidence_score,
+        "ocrConfidence": ocr_confidence,
+        "ocrRelevanceScore": relevance,
+        "ocrNonApplication": non_application,
+        "ocrSupportingTool": supporting_tool,
+        **ocr_class,
+        "supportingToolAllowed": supporting_tool_allowed,
+        "visualQualityScore": visual_quality,
+        "blurState": quality_signals.get("blurState"),
+        "dedupeState": quality_signals.get("dedupeState"),
+        "duplicateOfFrameId": quality_signals.get("duplicateOfFrameId"),
+        "ocrText": ocr_text,
+        "ocrSource": ocr_frame.get("source", ""),
+        "contentType": candidate_content_type(ocr_class["ocrClass"]),
+        "created": frame["created"],
+        "reason": reason,
+        "reviewStatus": "pending",
+    }
+
+
+def candidate_content_type(ocr_class: str) -> str:
+    if ocr_class == "application":
+        return "application"
+    if ocr_class == "supporting-tool":
+        return "supporting-tool"
+    if ocr_class == "non-application":
+        return "meeting-or-title-card"
+    return "unknown"
+
+
+def assign_frame_recommendation_groups(candidate_images: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ranked = sorted(candidate_images, key=candidate_review_sort_key)
+    recommended_assigned = False
+    for image in ranked:
+        decision = frame_recommendation_decision(image, recommended_assigned)
+        image["recommendationGroup"] = decision["group"]
+        image["selectionDecision"] = decision["group"]
+        image["recommendationReason"] = decision["reason"]
+        image["selectionReasons"] = decision["reasons"]
+        image["positiveSignals"] = decision["positiveSignals"]
+        image["penalties"] = decision["penalties"]
+        if decision["group"] == "recommended":
+            recommended_assigned = True
+    return sorted(ranked, key=candidate_review_sort_key)
+
+
+def candidate_review_sort_key(image: dict[str, Any]) -> tuple[int, int, int, float, float, float]:
+    system_reject = 1 if is_system_rejected_frame(image) else 0
+    app_rank = 0 if image.get("ocrClass") == "application" else 1
+    blur_rank = 1 if image.get("blurState") == "blurry" else 0
+    return (
+        system_reject,
+        app_rank,
+        blur_rank,
+        -float(image.get("frameEvidenceScore") or image.get("confidence") or 0),
+        -float(image.get("visualQualityScore") or 0),
+        float(image.get("timestampSeconds") or 0),
+    )
+
+
+def is_system_rejected_frame(image: dict[str, Any]) -> bool:
+    evidence = float(image.get("frameEvidenceScore") or image.get("confidence") or 0)
+    if image.get("ocrNonApplication"):
+        return True
+    if image.get("ocrSupportingTool") and not image.get("supportingToolAllowed"):
+        return True
+    if image.get("blurState") == "blurry" and evidence < 0.65:
+        return True
+    if evidence < 0.25:
+        return True
+    return False
+
+
+def frame_recommendation_decision(image: dict[str, Any], recommended_assigned: bool) -> dict[str, Any]:
+    evidence = float(image.get("frameEvidenceScore") or image.get("confidence") or 0)
+    positive_signals = []
+    penalties = []
+    if image.get("ocrClass") == "application":
+        positive_signals.append("OCR indicates the target application.")
+    if evidence >= 0.65:
+        positive_signals.append("Frame evidence score meets the publication threshold.")
+    if float(image.get("visualQualityScore") or 0) >= 0.65:
+        positive_signals.append("Local visual scoring indicates a usable screenshot.")
+    if image.get("ocrNonApplication"):
+        penalties.append("OCR indicates meeting, title-card, or non-application content.")
+    if image.get("ocrSupportingTool") and not image.get("supportingToolAllowed"):
+        penalties.append("OCR indicates a supporting tool unrelated to the narrated action.")
+    if image.get("blurState") == "blurry":
+        penalties.append("Local visual scoring marked the frame as blurry.")
+    if image.get("dedupeState") == "near-duplicate":
+        penalties.append(f"Frame is visually similar to {image.get('duplicateOfFrameId') or 'another candidate'}.")
+
+    if is_system_rejected_frame(image):
+        group = "system-rejected"
+        reason = "Excluded from first-pass recommendations because local checks found weak or non-application evidence."
+    elif not recommended_assigned and image.get("ocrClass") == "application" and evidence >= 0.55 and image.get("blurState") != "blurry":
+        group = "recommended"
+        reason = "Best first-pass screenshot candidate for this segment."
+    else:
+        group = "alternate"
+        reason = "Usable backup screenshot candidate."
+
+    return {
+        "group": group,
+        "reason": reason,
+        "reasons": positive_signals + penalties or [reason],
+        "positiveSignals": positive_signals,
+        "penalties": penalties,
+    }
+
+
+def ocr_relevance_score(source_text: str, ocr_text: str) -> float:
+    source_terms = tokenize_ocr_terms(source_text)
+    ocr_terms = tokenize_ocr_terms(ocr_text)
+    if not source_terms or not ocr_terms:
+        return 0.0
+    overlap = source_terms & ocr_terms
+    return clamp01(len(overlap) / max(1, min(len(source_terms), 10)))
+
+
+def tokenize_ocr_terms(text: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-zA-Z][a-zA-Z0-9]{2,}", text.lower())
+        if token not in OCR_STOP_WORDS
+    }
+
+
+def is_non_application_ocr_text(text: str) -> bool:
+    normalized = normalize_ocr_text(text).lower()
+    if not normalized:
+        return False
+    phrase_hits = sum(1 for phrase in NON_APPLICATION_OCR_PHRASES if phrase in normalized)
+    if phrase_hits >= 1 and ("teams" in normalized or "recorded by" in normalized or "organized by" in normalized):
+        return True
+    if phrase_hits >= 2:
+        return True
+    utc_title_card = bool(re.search(r"\b20\d{2}-\d{2}-\d{2}\b", normalized)) and "utc" in normalized
+    return utc_title_card and ("recorded" in normalized or "meeting" in normalized)
+
+
+def classify_ocr_surface(text: str) -> dict[str, Any]:
+    normalized = normalize_ocr_text(text).lower()
+    app_hits = [phrase for phrase in APP_SURFACE_OCR_PHRASES if phrase in normalized]
+    supporting_hits = [phrase for phrase in SUPPORTING_TOOL_OCR_PHRASES if phrase in normalized]
+    non_app_hits = [phrase for phrase in NON_APPLICATION_OCR_PHRASES if phrase in normalized]
+    if is_non_application_ocr_text(text) or looks_like_person_only_teams_frame(text, app_hits):
+        ocr_class = "non-application"
+    elif app_hits:
+        ocr_class = "application"
+    elif supporting_hits:
+        ocr_class = "supporting-tool"
+    else:
+        ocr_class = "unknown"
+    strongest = max(len(app_hits), len(supporting_hits), len(non_app_hits), 1)
+    return {
+        "ocrClass": ocr_class,
+        "ocrClassConfidence": clamp01(strongest / 5),
+        "appOcrScore": clamp01(len(app_hits) / 4),
+        "appTermHits": app_hits[:8],
+        "supportingToolHits": supporting_hits[:8],
+        "nonApplicationHits": non_app_hits[:8],
+        "ocrTokenCount": len(tokenize_ocr_terms(text)),
+    }
+
+
+def looks_like_person_only_teams_frame(text: str, app_hits: list[str]) -> bool:
+    if app_hits:
+        return False
+    normalized = normalize_ocr_text(text)
+    words = re.findall(r"[A-Za-z][A-Za-z'-]+", normalized)
+    if 2 <= len(words) <= 5 and re.search(r"\b(?:ust|in|guest|presenter)\b", normalized, flags=re.IGNORECASE):
+        return True
+    return bool(re.fullmatch(r"[A-Z][A-Za-z'-]+(?:\\s+[A-Z][A-Za-z'-]+){1,3}(?:\\s*\\([^)]{2,16}\\))?", normalized))
+
+
+def is_supporting_tool_ocr_text(text: str) -> bool:
+    normalized = normalize_ocr_text(text).lower()
+    if not normalized:
+        return False
+    return any(phrase in normalized for phrase in SUPPORTING_TOOL_OCR_PHRASES)
+
+
+def segment_allows_supporting_tool(text: str) -> bool:
+    normalized = normalize_ocr_text(text).lower()
+    return any(term in normalized for term in SUPPORTING_TOOL_ALLOWED_TERMS)
+
+
+def clamp01(value: float) -> float:
+    return round(min(1.0, max(0.0, float(value))), 3)
 
 
 def nearest_frames(
@@ -1104,8 +1996,24 @@ def nearest_frames(
     candidates = in_range or frames
     return sorted(
         candidates,
-        key=lambda frame: (abs(frame["timestampSeconds"] - midpoint), -frame["score"], frame["id"]),
+        key=nearest_frame_sort_key(midpoint),
     )[:limit]
+
+
+def nearest_frame_sort_key(midpoint: float):
+    def key(frame: dict[str, Any]) -> tuple[int, int, float, float, str]:
+        quality = frame.get("qualitySignals") if isinstance(frame.get("qualitySignals"), dict) else {}
+        duplicate_rank = 1 if quality.get("dedupeState") == "near-duplicate" else 0
+        blur_rank = 1 if quality.get("blurState") == "blurry" else 0
+        return (
+            blur_rank,
+            -float(frame.get("score") or 0),
+            duplicate_rank,
+            abs(float(frame.get("timestampSeconds") or 0) - midpoint),
+            str(frame.get("id") or ""),
+        )
+
+    return key
 
 
 def infer_action_hints(text: str) -> list[str]:

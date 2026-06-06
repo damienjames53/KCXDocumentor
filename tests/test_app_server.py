@@ -579,6 +579,86 @@ def test_migrate_usage_records_posts_local_export_to_remote(monkeypatch: pytest.
     }
 
 
+def test_write_generation_report_page_count_persists_usage_shape(tmp_path: Path) -> None:
+    module = load_app_server()
+    report_path = tmp_path / "generation_report.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "generationRunId": "run-a",
+                "generatedAt": "2026-06-04T16:34:09Z",
+                "sessionId": "session-a",
+                "title": "Guide A",
+                "usage": {
+                    "inputTokens": 1000,
+                    "outputTokens": 200,
+                    "totalTokens": 1200,
+                    "estimatedCostUSD": 0.06,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    updated = module.write_generation_report_page_count(report_path, 12)
+    persisted = json.loads(report_path.read_text(encoding="utf-8"))
+
+    assert updated["pageCount"] == 12
+    assert updated["usage"]["pageCount"] == 12
+    assert updated["usage"]["costPerPageUSD"] == 0.005
+    assert persisted == updated
+
+
+def test_report_page_count_updates_remote_usage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    generated_root = tmp_path / "artifacts" / "generated"
+    processed_root = tmp_path / "samples" / "processed"
+    session_dir = processed_root / "session-a"
+    generated_dir = generated_root / "session-a"
+    session_dir.mkdir(parents=True)
+    generated_dir.mkdir(parents=True)
+    (session_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    (generated_dir / "generation_report.json").write_text(
+        json.dumps(
+            {
+                "generationRunId": "run-a",
+                "generatedAt": "2026-06-04T16:34:09Z",
+                "sessionId": "session-a",
+                "title": "Guide A",
+                "usage": {"estimatedCostUSD": 0.06},
+            }
+        ),
+        encoding="utf-8",
+    )
+    doc = Document()
+    doc.add_paragraph("First page content.")
+    doc.add_page_break()
+    doc.add_paragraph("Second page content.")
+    doc.save(generated_dir / "user_guide.anthropic.docx")
+    posted: dict[str, Any] = {}
+
+    monkeypatch.setenv("KCXDOC_REMOTE_API_BASE_URL", "https://kcxdocumentor-ai-dev.azurewebsites.net")
+    monkeypatch.setattr(module, "GENERATED_ROOT", generated_root)
+    monkeypatch.setattr(module, "PROCESSED_ROOT", processed_root)
+    monkeypatch.setattr(module, "USAGE_DB_PATH", tmp_path / "artifacts" / "usage" / "generation_usage.sqlite3")
+
+    def fake_post(base_url: str, records: list[dict[str, Any]], timeout_seconds: float = 15.0, bearer_token: str = "") -> dict[str, Any]:
+        posted["base_url"] = base_url
+        posted["records"] = records
+        posted["bearer_token"] = bearer_token
+        return {"imported": 1}
+
+    monkeypatch.setattr(module, "post_remote_usage_records", fake_post)
+
+    result = module.report_page_count({"sessionId": "session-a"}, bearer_token="token-123")
+
+    assert result["pageCount"] >= 2
+    assert result["usageUpdate"] == {"imported": 1}
+    assert posted["bearer_token"] == "token-123"
+    assert posted["records"][0]["pageCount"] == result["pageCount"]
+    assert posted["records"][0]["usage"]["pageCount"] == result["pageCount"]
+
+
 def test_session_source_video_uses_manifest_recording_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_app_server()
     source = tmp_path / "samples" / "raw" / "demo.mp4"
@@ -967,3 +1047,126 @@ def test_extract_review_frame_adds_candidate_and_review_entry(tmp_path: Path, mo
     assert review["frames"]["review-frame-0007"]["status"] == "approved"
     assert review["frames"]["review-frame-0007"]["note"] == "Use this dialog."
     assert review["frames"]["review-frame-0007"]["assignedSegmentId"] == "seg-0002"
+
+
+def test_extract_review_frame_runs_ocr_and_saves_prompt_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    processed_root = tmp_path / "samples" / "processed"
+    session_dir = processed_root / "extract-context"
+    session_dir.mkdir(parents=True)
+    source = tmp_path / "samples" / "raw" / "demo.mov"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"fake video")
+    (session_dir / "manifest.json").write_text(
+        json.dumps({"schemaVersion": 1, "sessionId": "extract-context", "sourceFile": str(source)}),
+        encoding="utf-8",
+    )
+    (session_dir / "procedure_trace.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "sessionId": "extract-context",
+                "recording": {"targetApplication": "Blink Rx"},
+                "segments": [
+                    {
+                        "id": "seg-0002",
+                        "speakerText": "Click Submit to finish the refill request.",
+                        "startSeconds": 60.0,
+                        "endSeconds": 90.0,
+                        "start": "00:01:00.000",
+                        "end": "00:01:30.000",
+                        "candidateImages": [],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_dir / "frame_scores.json").write_text(json.dumps({"schemaVersion": 1, "frames": []}), encoding="utf-8")
+    monkeypatch.setattr(module, "PROCESSED_ROOT", processed_root)
+    monkeypatch.setattr(module.shutil, "which", lambda name: f"/usr/bin/{name}" if name in {"ffmpeg", "tesseract"} else None)
+
+    def fake_run_command(command: list[str]) -> dict[str, Any]:
+        Path(command[-1]).write_bytes(b"png")
+        return {"returnCode": 0, "stdout": "", "stderr": ""}
+
+    class FakeProcessor:
+        @staticmethod
+        def evaluate_frame_visual_quality(frame: dict[str, Any], session_dir: Path) -> dict[str, Any]:
+            return {"qualityScore": 0.9, "blurState": "sharp", "averageHash": "ffff0000ffff0000"}
+
+        @staticmethod
+        def nearest_visual_duplicate(current_hash: str, prior_hashes: list[tuple[str, str]]) -> None:
+            return None
+
+        @staticmethod
+        def frame_selection_reason(visual: dict[str, Any], duplicate_of: str | None) -> str:
+            return "Added with local visual quality scoring."
+
+        @staticmethod
+        def clamp01(value: float) -> float:
+            return round(min(1.0, max(0.0, value)), 3)
+
+        @staticmethod
+        def parse_float(value: Any) -> float | None:
+            return float(value) if value not in (None, "") else None
+
+        @staticmethod
+        def run_tesseract_ocr(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            return {"textBlocks": [{"text": "Submit Refill Request", "confidence": 88.0}], "error": None}
+
+        @staticmethod
+        def average_block_confidence(blocks: list[dict[str, Any]]) -> float:
+            return 0.88
+
+        @staticmethod
+        def build_placeholder_ocr_frame(frame: dict[str, Any], target_application: str, reason: str) -> dict[str, Any]:
+            return {"frameId": frame["id"], "source": "prototype-placeholder", "confidence": 0, "combinedText": target_application, "textBlocks": [], "error": reason}
+
+        @staticmethod
+        def build_candidate_image(frame: dict[str, Any], ocr_frame: dict[str, Any], segment: dict[str, Any], target_application: str) -> dict[str, Any]:
+            return {
+                "frameId": frame["id"],
+                "frameEvidenceScore": 0.91,
+                "ocrConfidence": 0.88,
+                "ocrRelevanceScore": 0.8,
+                "ocrClass": "application",
+                "ocrText": ocr_frame["combinedText"],
+                "contentType": "application",
+                "reason": "OCR matched the segment context.",
+            }
+
+        @staticmethod
+        def assign_frame_recommendation_groups(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            images[0]["recommendationGroup"] = "recommended"
+            images[0]["selectionDecision"] = "recommended"
+            images[0]["recommendationReason"] = "Best manual screenshot candidate."
+            return images
+
+    monkeypatch.setattr(module, "load_process_recording_module", lambda: FakeProcessor)
+    monkeypatch.setattr(module, "run_command", fake_run_command)
+
+    result = module.extract_review_frame(
+        {
+            "sessionId": "extract-context",
+            "timestamp": "01:10",
+            "frameId": "review-frame-0008",
+            "segmentId": "seg-0002",
+        }
+    )
+
+    assert result["frame"]["ocrText"] == "Submit Refill Request"
+    assert result["frame"]["ocrClass"] == "application"
+    assert result["frame"]["recommendationGroup"] == "recommended"
+    frame_scores = json.loads((session_dir / "frame_scores.json").read_text(encoding="utf-8"))
+    assert frame_scores["frames"][0]["frameEvidenceScore"] == 0.91
+    ocr = json.loads((session_dir / "ocr.json").read_text(encoding="utf-8"))
+    assert ocr["frames"][0]["combinedText"] == "Submit Refill Request"
+    trace = module.apply_frame_review_to_trace(
+        json.loads((session_dir / "procedure_trace.json").read_text(encoding="utf-8")),
+        json.loads((session_dir / "frame_review.json").read_text(encoding="utf-8")),
+    )
+    image = trace["segments"][0]["candidateImages"][0]
+    assert image["frameId"] == "review-frame-0008"
+    assert image["ocrText"] == "Submit Refill Request"
+    assert image["recommendationGroup"] == "recommended"

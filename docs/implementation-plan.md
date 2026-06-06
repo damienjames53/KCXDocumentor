@@ -58,6 +58,40 @@ Security controls for this local-trust model:
 - AI/Cosmos calls must continue to require a valid Entra token validated by the Azure Function.
 - KCXDocumentor should not be deployed as a multi-user web server without reintroducing full server-side authorization for local artifact endpoints.
 
+## Document Quality Findings
+
+Visual review of the generated DOCX artifacts showed that guide prose has improved, but screenshot selection is still the main publication-quality risk.
+
+Current findings:
+
+- Some regenerated guides still choose screenshots that are only loosely related to the step text because frame selection is timestamp/cadence based.
+- Teams or video-player overlays can appear in selected screenshots and can obscure the application.
+- Local OCR is now wired through Tesseract, so the system can capture UI text evidence from selected frames; frame scoring still needs to use that evidence to prefer application screens over Teams/title-card frames.
+- Slide-deck or glossary recordings are being forced into step-by-step workflow guides, which can create long, low-value documents with repeated slide images.
+- Transcript/STT quality is important, but the observed screenshot mismatch is primarily an OCR/frame-selection/content-classification problem rather than a voice-to-text problem.
+
+Required improvements before treating output as customer-ready:
+
+- Add recording content classification: application workflow, slide/reference training, glossary/concepts, or mixed content.
+- Generate different document structures by content type instead of always forcing a procedure guide.
+- Use real local Tesseract OCR to store recognized UI text per frame with confidence and bounds; treat missing OCR as a reviewer concern.
+- Score candidate frames using UI text overlap with the step, OCR confidence, and penalties for Teams/title-card or supporting-tool frames that do not match the current segment context.
+- Compress the AI submission payload before generation: preserve full OCR locally, but send only concise visible UI text, bounded OCR snippets, frame evidence scores, and reviewer decisions.
+- Continue improving frame scoring with visual-change/dedupe scoring, blur checks, and stronger overlay detection.
+- Penalize or reject frames containing Teams join dialogs, meeting controls, presenter overlays, web video playback controls, or production title cards.
+- Keep frame review as a required quality gate for externally shared documents until OCR and frame scoring are strong enough to trust automatically.
+- Treat missing or low-confidence screenshot evidence as reviewer comments, not visible guide body text.
+- Persist rendered page counts after DOCX build and report them to AI Spend as a separate authenticated reporting step so local document creation is not blocked by token state.
+
+Implemented review-gate improvements:
+
+- `procedure_trace.json` now includes `contentClassification` so the pipeline can distinguish application workflows, mixed workflow training, slide/reference training, and meeting-like sources before guide generation.
+- Each segment now includes `qualityLabel`, `qualityLabels`, `reviewPriority`, `frameReviewSummary`, and `screenshotGap` so reviewers see why a section needs attention without exposing that language in the customer-facing guide body.
+- Candidate screenshots now include `contentType`, `recommendationGroup`, `selectionDecision`, `recommendationReason`, positive signals, and penalties. Frames are grouped as `recommended`, `alternate`, or `system-rejected`.
+- System-rejected screenshots are not sent to the AI payload unless a reviewer explicitly approves them. User-rejected screenshots remain excluded and their notes continue to feed reviewer guidance.
+- Screenshot gaps are surfaced as structured `screenshotGapTasks` and in the UI readiness checks before guide creation.
+- Frames added through the video picker now run local visual scoring and Tesseract OCR when available, are mapped to the selected segment, and carry compact OCR/evidence context into guide generation unless rejected.
+
 ## Recommended Stack
 
 | Layer | Recommendation | Reason |
@@ -187,6 +221,13 @@ This starts as a local web page that reads the processed session bundle and writ
 The review surface should use the KCXUIComponents visual standard even during the prototype stage so the workflow can graduate into either a web client or Windows client without rethinking the product ergonomics.
 
 The current Blink Rx test showed that Anthropic can produce useful procedure prose, but the generated DOCX is not customer-ready unless the reviewer concerns are handled correctly. Reviewer concerns such as unclear transcript stretches, screenshot approval, UI evidence, source timing, placeholder OCR, and confidence issues must appear in Word comments or reviewer-only fallback sections, not in the visible guide body.
+
+Current frame review behavior:
+
+- Recommended frames appear first and are the only automatically preferred screenshot candidates.
+- Alternate frames remain available for human substitution.
+- Needs Attention frames are visually de-emphasized and excluded from AI generation unless the reviewer approves one. The internal trace value remains `system-rejected` for compatibility.
+- Screenshot gap tasks let reviewers jump directly into video-based frame capture for segments that do not have a trustworthy application screenshot.
 
 ## Current Test Fixture
 

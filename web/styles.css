@@ -327,6 +327,15 @@ label span {
   white-space: nowrap;
 }
 
+.sign-in-button[hidden] {
+  display: none;
+}
+
+.sign-in-button {
+  min-width: 92px;
+  font-weight: 850;
+}
+
 .usage-status-button {
   display: inline-flex;
   flex-direction: column;
@@ -611,6 +620,26 @@ label span {
 .guide-action-row .button-link {
   flex: 1 1 110px;
   font-weight: 750;
+}
+
+.cloud-auth-notice {
+  display: grid;
+  gap: 2px;
+  border: 1px solid #9edbe1;
+  border-radius: var(--kcx-ui-radius-md);
+  background: linear-gradient(180deg, var(--kcx-ui-color-primary-soft), #fff);
+  color: var(--brand-strong);
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.cloud-auth-notice[hidden] {
+  display: none;
+}
+
+.cloud-auth-notice span {
+  color: var(--muted);
 }
 
 .qa-action-surface {
@@ -926,6 +955,40 @@ label span {
   text-align: right;
 }
 
+.segment-quality-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.segment-quality,
+.segment-quality-label {
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.segment-quality.good,
+.segment-quality-label.good {
+  background: var(--kcx-ui-color-success-soft);
+  color: var(--kcx-ui-color-success);
+}
+
+.segment-quality.warn,
+.segment-quality-label.warn,
+.segment-quality-label.info {
+  background: var(--kcx-ui-color-warning-soft);
+  color: var(--warn);
+}
+
+.segment-quality.bad,
+.segment-quality-label.bad {
+  background: var(--kcx-ui-color-danger-soft);
+  color: var(--kcx-ui-color-danger);
+}
+
 .segment-card p {
   margin: 10px 0;
   line-height: 1.45;
@@ -960,6 +1023,78 @@ label span {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: 10px;
+}
+
+.frame-groups {
+  display: grid;
+  gap: 16px;
+}
+
+.frame-group {
+  display: grid;
+  gap: 8px;
+}
+
+.frame-group-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 6px;
+}
+
+.frame-group-header span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.frame-group-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.screenshot-gap-tasks {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--kcx-ui-color-danger);
+  border-radius: var(--kcx-ui-radius-md);
+  background: var(--kcx-ui-color-danger-soft);
+  padding: 12px;
+  margin: 0 0 12px;
+}
+
+.screenshot-gap-tasks[hidden] {
+  display: none;
+}
+
+.screenshot-gap-tasks header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.screenshot-gap-tasks header span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.screenshot-gap-task {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 10px;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--kcx-ui-radius-md);
+  background: #fff;
+  color: var(--text);
+  padding: 8px;
+  text-align: left;
+}
+
+.screenshot-gap-task span {
+  color: var(--muted);
 }
 
 .frame-review-toolbar {
@@ -1072,6 +1207,26 @@ label span {
 .frame-card.rejected {
   border-color: var(--kcx-ui-color-danger);
   background: var(--kcx-ui-color-danger-soft);
+}
+
+.frame-card.recommended {
+  box-shadow: inset 0 3px 0 var(--kcx-ui-color-success);
+}
+
+.frame-card.alternate {
+  box-shadow: inset 0 3px 0 var(--brand);
+}
+
+.frame-card.system-rejected {
+  opacity: 0.72;
+  background: linear-gradient(180deg, #fff, #f7f9fb);
+}
+
+.frame-warning {
+  margin: 6px 0 0;
+  color: var(--kcx-ui-color-danger);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .frame-preview {
@@ -1198,6 +1353,36 @@ label span {
 .frame-card small {
   color: var(--muted);
   font-size: 12px;
+}
+
+.frame-card-meta {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.frame-group-pill {
+  display: inline-block;
+  width: fit-content;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.frame-group-pill.recommended {
+  background: var(--kcx-ui-color-success-soft);
+  color: var(--kcx-ui-color-success);
+}
+
+.frame-group-pill.alternate {
+  background: var(--kcx-ui-color-primary-soft);
+  color: var(--brand-strong);
+}
+
+.frame-group-pill.system-rejected {
+  background: var(--kcx-ui-color-danger-soft);
+  color: var(--kcx-ui-color-danger);
 }
 
 .frame-card-header {

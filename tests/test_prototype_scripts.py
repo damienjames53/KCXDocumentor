@@ -12,9 +12,10 @@ from zipfile import ZipFile
 import pytest
 from docx import Document
 try:
-    from PIL import Image
+    from PIL import Image, ImageDraw
 except ImportError:  # pragma: no cover - optional visual QA dependency
     Image = None
+    ImageDraw = None
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -263,6 +264,47 @@ def test_build_guide_docx_converts_markdown_bold_to_word_runs(tmp_path: Path) ->
         if run.bold
     }
     assert {"Blink RX", "Interfaces", "Customer Type", "Blink", "AR account"}.issubset(bold_run_text)
+
+
+def test_build_guide_docx_does_not_render_visible_screenshot_caption(tmp_path: Path) -> None:
+    if Image is None:
+        pytest.skip("Pillow is not installed")
+    image_path = tmp_path / "application-frame.png"
+    Image.new("RGB", (640, 360), "white").save(image_path)
+    input_path = tmp_path / "caption-draft.json"
+    output_path = tmp_path / "caption-guide.docx"
+    input_path.write_text(
+        json.dumps(
+            {
+                "title": "Screenshot Caption Guide",
+                "steps": [
+                    {
+                        "title": "Open the request",
+                        "instruction": "Open the request screen.",
+                        "screenshot": str(image_path),
+                        "caption": "Frame frame-0001 at 00:01:00.000",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(BUILD_GUIDE_DOCX_SCRIPT), str(input_path), "--output", str(output_path)],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    doc = Document(output_path)
+    body_text = "\n".join(paragraph.text for paragraph in doc.paragraphs)
+    assert "Frame frame-0001 at 00:01:00.000" not in body_text
+    with ZipFile(output_path) as package:
+        comments_xml = package.read("word/comments.xml").decode("utf-8")
+    assert "Frame frame-0001 at 00:01:00.000" in comments_xml
 
 
 def test_build_guide_docx_places_reviewer_concerns_in_comments_not_body(tmp_path: Path) -> None:
@@ -679,6 +721,19 @@ def test_build_guide_docx_routes_dark_meeting_frame_to_reviewer_comment(tmp_path
     assert "teams-card.png" not in document_xml
 
 
+def test_build_guide_docx_routes_centered_meeting_overlay_to_reviewer_comment(tmp_path: Path) -> None:
+    if Image is None or ImageDraw is None:
+        pytest.skip("Pillow is not installed")
+    module = load_module(BUILD_GUIDE_DOCX_SCRIPT, "build_guide_docx_centered_overlay")
+    image_path = tmp_path / "meeting-overlay.png"
+    image = Image.new("RGB", (900, 520), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((270, 170, 630, 350), fill=(20, 20, 24))
+    image.save(image_path)
+
+    assert module.is_likely_non_application_screenshot(image_path) is True
+
+
 def test_build_guide_docx_preserves_detailed_review_guidance_in_comments(tmp_path: Path) -> None:
     input_path = tmp_path / "review-guidance-draft.json"
     output_path = tmp_path / "review-guidance-guide.docx"
@@ -998,6 +1053,124 @@ def test_prepare_trace_for_anthropic_prunes_rejected_frames_and_preserves_review
     assert prepared["excludedFrames"][0]["sourceSegmentId"] == "seg-0001"
     assert "Do not use this Teams title card." in json.dumps(prepared["reviewGuidance"])
     assert "Confirm terminology." in json.dumps(prepared["reviewGuidance"])
+
+
+def test_prepare_trace_for_anthropic_prunes_system_rejected_frames() -> None:
+    module = load_module(GUIDE_DRAFT_SCRIPT, "generate_guide_draft_system_rejected")
+    trace = {
+        "segments": [
+            {
+                "id": "seg-0001",
+                "candidateImages": [
+                    {
+                        "frameId": "frame-good",
+                        "path": "frames/frame-good.png",
+                        "timestamp": "00:01:00.000",
+                        "timestampSeconds": 60.0,
+                        "created": True,
+                        "reviewStatus": "pending",
+                        "recommendationGroup": "recommended",
+                        "frameEvidenceScore": 0.82,
+                    },
+                    {
+                        "frameId": "frame-system-rejected",
+                        "path": "frames/frame-system-rejected.png",
+                        "timestamp": "00:01:30.000",
+                        "timestampSeconds": 90.0,
+                        "created": True,
+                        "reviewStatus": "pending",
+                        "recommendationGroup": "system-rejected",
+                        "recommendationReason": "Likely Teams title card.",
+                    },
+                ],
+            }
+        ],
+    }
+
+    prepared = module.prepare_trace_for_anthropic(trace)
+
+    assert [image["frameId"] for image in prepared["segments"][0]["candidateImages"]] == ["frame-good"]
+    assert prepared["excludedFrames"][0]["frameId"] == "frame-system-rejected"
+    assert prepared["excludedFrames"][0]["exclusionReason"] == "Likely Teams title card."
+
+
+def test_prepare_trace_for_anthropic_compacts_ocr_payload() -> None:
+    module = load_module(GUIDE_DRAFT_SCRIPT, "generate_guide_draft_compact_ocr")
+    long_ocr = " | ".join(
+        [
+            "Blink Mock UI Refill Request Patient Profile Submit",
+            "12345",
+            "----",
+            "Transfer Back Transfer In Claims Dispense Create Request",
+        ]
+        * 30
+    )
+    trace = {
+        "segments": [
+            {
+                "id": "seg-0001",
+                "visibleUiText": ["1", "-", "Blink Mock UI", "Submit", "Submit", "12345"],
+                "candidateImages": [
+                    {
+                        "frameId": "frame-1",
+                        "path": "frames/frame-1.png",
+                        "timestamp": "00:01:00.000",
+                        "timestampSeconds": 60.0,
+                        "created": True,
+                        "reviewStatus": "pending",
+                        "frameEvidenceScore": 0.8,
+                        "ocrConfidence": 0.7,
+                        "recommendationGroup": "recommended",
+                        "selectionReasons": ["OCR indicates the target application."],
+                        "contentType": "application",
+                        "ocrText": long_ocr,
+                        "reason": "A very long reason. " * 40,
+                    },
+                    {
+                        "frameId": "frame-2",
+                        "path": "frames/frame-2.png",
+                        "timestamp": "00:01:20.000",
+                        "timestampSeconds": 80.0,
+                        "created": True,
+                        "reviewStatus": "pending",
+                        "frameEvidenceScore": 0.4,
+                        "ocrText": long_ocr,
+                    },
+                    {
+                        "frameId": "frame-3",
+                        "path": "frames/frame-3.png",
+                        "timestamp": "00:01:40.000",
+                        "timestampSeconds": 100.0,
+                        "created": True,
+                        "reviewStatus": "pending",
+                        "frameEvidenceScore": 0.3,
+                        "ocrText": long_ocr,
+                    },
+                    {
+                        "frameId": "frame-4",
+                        "path": "frames/frame-4.png",
+                        "timestamp": "00:02:00.000",
+                        "timestampSeconds": 120.0,
+                        "created": True,
+                        "reviewStatus": "pending",
+                        "frameEvidenceScore": 0.2,
+                        "ocrText": long_ocr,
+                    },
+                ],
+            }
+        ]
+    }
+
+    prepared = module.prepare_trace_for_anthropic(trace)
+    segment = prepared["segments"][0]
+
+    assert segment["visibleUiText"] == ["Blink Mock UI", "Submit"]
+    assert len(segment["candidateImages"]) == 3
+    assert segment["candidateImages"][0]["frameId"] == "frame-1"
+    assert segment["candidateImages"][0]["recommendationGroup"] == "recommended"
+    assert segment["candidateImages"][0]["contentType"] == "application"
+    assert len(segment["candidateImages"][0]["ocrText"]) <= 360
+    assert len(segment["candidateImages"][0]["reason"]) <= 220
 
 
 def test_anthropic_payload_excludes_rejected_frame_candidates_but_keeps_notes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1419,6 +1592,311 @@ def test_process_recording_accepts_sidecar_transcript_without_media_tools(tmp_pa
     assert trace_payload["segments"][0]["confidence"]["needsHumanReview"] is True
 
 
+def test_tesseract_tsv_parser_groups_words_into_text_blocks() -> None:
+    module = load_module(PROCESS_RECORDING_SCRIPT, "process_recording_ocr_parser")
+    raw_tsv = "\n".join(
+        [
+            "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext",
+            "5\t1\t1\t1\t1\t1\t10\t20\t42\t12\t92\tPatient",
+            "5\t1\t1\t1\t1\t2\t58\t20\t38\t12\t88\tProfile",
+            "5\t1\t1\t1\t2\t1\t10\t42\t31\t12\t81\tSave",
+            "5\t1\t1\t1\t2\t2\t48\t42\t44\t12\t79\tChanges",
+            "5\t1\t2\t1\t1\t1\t10\t80\t20\t12\t-1\t",
+        ]
+    )
+
+    blocks = module.parse_tesseract_tsv(raw_tsv)
+
+    assert blocks == [
+        {
+            "text": "Patient Profile",
+            "confidence": 0.9,
+            "bounds": {"left": 10, "top": 20, "width": 86, "height": 12},
+        },
+        {
+            "text": "Save Changes",
+            "confidence": 0.8,
+            "bounds": {"left": 10, "top": 42, "width": 82, "height": 12},
+        },
+    ]
+
+
+def test_build_ocr_runs_tesseract_and_stores_confidence(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    module = load_module(PROCESS_RECORDING_SCRIPT, "process_recording_ocr_builder")
+    session_dir = tmp_path / "session"
+    frame_path = session_dir / "frames" / "candidates" / "frame-0001.png"
+    frame_path.parent.mkdir(parents=True)
+    frame_path.write_bytes(b"fake image bytes")
+    frame_scores = {
+        "frames": [
+            {
+                "id": "frame-0001",
+                "timestampSeconds": 12.0,
+                "timestamp": "00:00:12.000",
+                "path": "frames/candidates/frame-0001.png",
+                "created": True,
+            }
+        ]
+    }
+    args = type(
+        "Args",
+        (),
+        {
+            "target_application": "Blink Rx",
+            "ocr_language": "eng",
+            "ocr_psm": "11",
+            "ocr_timeout_seconds": 20.0,
+        },
+    )()
+
+    def fake_run_command(cmd: list[str], timeout_seconds: float) -> dict[str, object]:
+        assert cmd[:3] == ["/usr/bin/tesseract", str(frame_path), "stdout"]
+        assert ["-l", "eng"] == cmd[3:5]
+        assert ["--psm", "11"] == cmd[5:7]
+        assert timeout_seconds == 20.0
+        return {
+            "returnCode": 0,
+            "stdout": "\n".join(
+                [
+                    "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext",
+                    "5\t1\t1\t1\t1\t1\t10\t20\t42\t12\t90\tRefill",
+                    "5\t1\t1\t1\t1\t2\t58\t20\t38\t12\t86\tRequest",
+                ]
+            ),
+            "stderr": "",
+        }
+
+    monkeypatch.setattr(module, "run_command", fake_run_command)
+
+    payload = module.build_ocr(
+        frame_scores,
+        session_dir,
+        module.Tooling(ffprobe=None, ffmpeg=None, whisper=None, tesseract="/usr/bin/tesseract"),
+        args,
+    )
+
+    assert payload["source"] == "tesseract"
+    assert payload["frames"][0]["source"] == "tesseract"
+    assert payload["frames"][0]["combinedText"] == "Refill Request"
+    assert payload["frames"][0]["confidence"] == 0.88
+    assert payload["frames"][0]["textBlocks"][0]["bounds"] == {"left": 10, "top": 20, "width": 86, "height": 12}
+
+
+def test_candidate_image_penalizes_teams_title_card_ocr() -> None:
+    module = load_module(PROCESS_RECORDING_SCRIPT, "process_recording_ocr_frame_scoring")
+    frame = {
+        "id": "frame-title",
+        "timestamp": "00:01:00.000",
+        "timestampSeconds": 60.0,
+        "path": "frames/candidates/frame-title.png",
+        "webPath": "frames/candidates/frame-title.png",
+        "score": 0.82,
+        "created": True,
+        "selectionReason": "Extracted at regular interval for prototype review.",
+    }
+    ocr_frame = {
+        "source": "tesseract",
+        "confidence": 0.94,
+        "combinedText": "Microsoft Teams Newleaf and General Pharmacy Industry Training Sessions 2025-12-05 15:01 UTC Recorded by Tina Drake",
+    }
+    segment = {"text": "Open the refill request screen and review the patient profile."}
+
+    image = module.build_candidate_image(frame, ocr_frame, segment, "Blink Rx")
+
+    assert image["ocrNonApplication"] is True
+    assert image["frameEvidenceScore"] <= 0.34
+    assert "Penalized" in image["reason"]
+
+
+def test_candidate_image_boosts_application_ocr_overlap() -> None:
+    module = load_module(PROCESS_RECORDING_SCRIPT, "process_recording_ocr_app_scoring")
+    frame = {
+        "id": "frame-app",
+        "timestamp": "00:02:00.000",
+        "timestampSeconds": 120.0,
+        "path": "frames/candidates/frame-app.png",
+        "webPath": "frames/candidates/frame-app.png",
+        "score": 0.72,
+        "created": True,
+        "selectionReason": "Extracted at regular interval for prototype review.",
+    }
+    ocr_frame = {
+        "source": "tesseract",
+        "confidence": 0.64,
+        "combinedText": "Blink Mock UI Refill Request Patient Profile Submit Create Request",
+    }
+    segment = {"text": "Create the refill request from the patient profile and submit it."}
+
+    image = module.build_candidate_image(frame, ocr_frame, segment, "Blink Rx")
+
+    assert image["ocrNonApplication"] is False
+    assert image["ocrRelevanceScore"] >= 0.4
+    assert image["frameEvidenceScore"] > 0.5
+
+
+def test_candidate_image_penalizes_supporting_tool_when_segment_is_application_workflow() -> None:
+    module = load_module(PROCESS_RECORDING_SCRIPT, "process_recording_supporting_tool_scoring")
+    frame = {
+        "id": "frame-json",
+        "timestamp": "00:02:00.000",
+        "timestampSeconds": 120.0,
+        "path": "frames/candidates/frame-json.png",
+        "webPath": "frames/candidates/frame-json.png",
+        "score": 0.83,
+        "created": True,
+        "selectionReason": "Extracted at regular interval for prototype review.",
+    }
+    ocr_frame = {
+        "source": "tesseract",
+        "confidence": 0.82,
+        "combinedText": "C:\\BlinkMockData\\Requests.json Notepad++ Administrator refill initiation request",
+    }
+    segment = {"text": "Complete the refill request in Blink Rx and verify the prescription screen."}
+
+    image = module.build_candidate_image(frame, ocr_frame, segment, "Blink Rx")
+
+    assert image["ocrSupportingTool"] is True
+    assert image["frameEvidenceScore"] <= 0.46
+    assert "supporting tool" in image["reason"]
+
+
+def test_candidate_image_allows_supporting_tool_for_mock_json_segment() -> None:
+    module = load_module(PROCESS_RECORDING_SCRIPT, "process_recording_supporting_tool_allowed")
+    frame = {
+        "id": "frame-json",
+        "timestamp": "00:02:00.000",
+        "timestampSeconds": 120.0,
+        "path": "frames/candidates/frame-json.png",
+        "webPath": "frames/candidates/frame-json.png",
+        "score": 0.83,
+        "created": True,
+        "selectionReason": "Extracted at regular interval for prototype review.",
+    }
+    ocr_frame = {
+        "source": "tesseract",
+        "confidence": 0.82,
+        "combinedText": "C:\\BlinkMockData\\Requests.json Notepad++ Administrator refill initiation request",
+    }
+    segment = {"text": "Update the mock request JSON value before rerunning the refill test."}
+
+    image = module.build_candidate_image(frame, ocr_frame, segment, "Blink Rx")
+
+    assert image["ocrSupportingTool"] is True
+    assert image["frameEvidenceScore"] > 0.46
+
+
+def test_generate_draft_prefers_application_frame_over_clean_teams_title_card() -> None:
+    module = load_module(GUIDE_DRAFT_SCRIPT, "generate_guide_draft_ocr_sorting")
+    teams_title = {
+        "frameId": "teams-title",
+        "path": "frames/candidates/teams-title.png",
+        "timestampSeconds": 60.0,
+        "score": 0.9,
+        "confidence": 0.34,
+        "frameEvidenceScore": 0.34,
+        "ocrConfidence": 0.94,
+        "ocrNonApplication": True,
+        "created": True,
+        "reviewStatus": "pending",
+    }
+    app_frame = {
+        "frameId": "app-frame",
+        "path": "frames/candidates/app-frame.png",
+        "timestampSeconds": 90.0,
+        "score": 0.72,
+        "confidence": 0.58,
+        "frameEvidenceScore": 0.58,
+        "ocrConfidence": 0.64,
+        "ocrNonApplication": False,
+        "created": True,
+        "reviewStatus": "pending",
+    }
+    draft = {"steps": [{"instruction": "Create the refill request.", "sourceSegments": ["seg-0001"]}]}
+    trace = {
+        "sessionId": "demo-session",
+        "segments": [{"id": "seg-0001", "candidateImages": [teams_title, app_frame]}],
+    }
+
+    enriched = module.attach_screenshot_references(draft, trace)
+
+    assert enriched["steps"][0]["screenshotRef"] == "app-frame"
+
+
+def test_generate_draft_prefers_application_frame_over_supporting_tool() -> None:
+    module = load_module(GUIDE_DRAFT_SCRIPT, "generate_guide_draft_supporting_tool_sorting")
+    supporting_tool = {
+        "frameId": "json-frame",
+        "path": "frames/candidates/json-frame.png",
+        "timestampSeconds": 60.0,
+        "score": 0.9,
+        "confidence": 0.46,
+        "frameEvidenceScore": 0.46,
+        "ocrSupportingTool": True,
+        "created": True,
+        "reviewStatus": "pending",
+    }
+    app_frame = {
+        "frameId": "app-frame",
+        "path": "frames/candidates/app-frame.png",
+        "timestampSeconds": 80.0,
+        "score": 0.7,
+        "confidence": 0.5,
+        "frameEvidenceScore": 0.5,
+        "created": True,
+        "reviewStatus": "pending",
+    }
+    draft = {"steps": [{"instruction": "Complete the refill request.", "sourceSegments": ["seg-0001"]}]}
+    trace = {
+        "sessionId": "demo-session",
+        "segments": [{"id": "seg-0001", "candidateImages": [supporting_tool, app_frame]}],
+    }
+
+    enriched = module.attach_screenshot_references(draft, trace)
+
+    assert enriched["steps"][0]["screenshotRef"] == "app-frame"
+
+
+def test_generate_draft_prefers_unique_sharp_frame_over_blurry_duplicate() -> None:
+    module = load_module(GUIDE_DRAFT_SCRIPT, "generate_guide_draft_visual_quality_sorting")
+    duplicate = {
+        "frameId": "duplicate",
+        "path": "frames/candidates/duplicate.png",
+        "timestampSeconds": 60.0,
+        "score": 0.9,
+        "confidence": 0.72,
+        "frameEvidenceScore": 0.72,
+        "visualQualityScore": 0.3,
+        "dedupeState": "near-duplicate",
+        "blurState": "blurry",
+        "ocrClass": "application",
+        "created": True,
+        "reviewStatus": "pending",
+    }
+    sharp = {
+        "frameId": "sharp",
+        "path": "frames/candidates/sharp.png",
+        "timestampSeconds": 80.0,
+        "score": 0.68,
+        "confidence": 0.7,
+        "frameEvidenceScore": 0.7,
+        "visualQualityScore": 0.9,
+        "dedupeState": "unique",
+        "blurState": "sharp",
+        "ocrClass": "application",
+        "created": True,
+        "reviewStatus": "pending",
+    }
+    draft = {"steps": [{"instruction": "Complete the refill request.", "sourceSegments": ["seg-0001"]}]}
+    trace = {
+        "sessionId": "demo-session",
+        "segments": [{"id": "seg-0001", "candidateImages": [duplicate, sharp]}],
+    }
+
+    enriched = module.attach_screenshot_references(draft, trace)
+
+    assert enriched["steps"][0]["screenshotRef"] == "sharp"
+
+
 def test_caption_parser_ignores_teams_cue_ids_and_voice_tags() -> None:
     module = load_module(PROCESS_RECORDING_SCRIPT, "process_recording_caption_parser")
     raw_text = """WEBVTT
@@ -1570,6 +2048,148 @@ def test_teams_recording_profile_skips_intro_and_crops_frames() -> None:
     assert module.planned_frame_timestamps(300.0, 30.0, 3, start_seconds=60.0) == [60.0, 90.0, 120.0]
 
 
+def test_score_frames_marks_near_duplicate_frames(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_module(PROCESS_RECORDING_SCRIPT, "process_recording_visual_dedupe")
+    frames = [
+        {"id": "frame-1", "timestampSeconds": 10.0, "timestamp": "00:00:10.000", "created": True, "path": "frame-1.png"},
+        {"id": "frame-2", "timestampSeconds": 20.0, "timestamp": "00:00:20.000", "created": True, "path": "frame-2.png"},
+    ]
+
+    def fake_quality(frame, session_dir):
+        return {
+            "qualityScore": 0.8,
+            "sharpnessScore": 0.8,
+            "exposureScore": 0.8,
+            "blurState": "sharp",
+            "exposureState": "usable",
+            "averageHash": "ffff0000ffff0000",
+            "visualScoringAvailable": True,
+        }
+
+    monkeypatch.setattr(module, "evaluate_frame_visual_quality", fake_quality)
+
+    scored = module.score_frames(frames, {"durationSeconds": 120.0}, 10.0)
+
+    assert scored["frames"][0]["qualitySignals"]["dedupeState"] == "unique"
+    assert scored["frames"][1]["qualitySignals"]["dedupeState"] == "near-duplicate"
+    assert scored["frames"][1]["qualitySignals"]["duplicateOfFrameId"] == "frame-1"
+    assert scored["frames"][1]["score"] < scored["frames"][0]["score"]
+
+
+def test_nearest_frames_prefers_unique_sharp_candidate_over_closer_duplicate() -> None:
+    module = load_module(PROCESS_RECORDING_SCRIPT, "process_recording_nearest_quality")
+    frames = [
+        {
+            "id": "duplicate",
+            "timestampSeconds": 60.0,
+            "score": 0.9,
+            "qualitySignals": {"dedupeState": "near-duplicate", "blurState": "blurry"},
+        },
+        {
+            "id": "sharp",
+            "timestampSeconds": 70.0,
+            "score": 0.7,
+            "qualitySignals": {"dedupeState": "unique", "blurState": "sharp"},
+        },
+    ]
+
+    selected = module.nearest_frames(frames, 55.0, 75.0, 1)
+
+    assert selected[0]["id"] == "sharp"
+
+
+def test_ocr_surface_classifier_identifies_application_and_person_frames() -> None:
+    module = load_module(PROCESS_RECORDING_SCRIPT, "process_recording_ocr_classifier")
+
+    app = module.classify_ocr_surface("Blink Mock UI MANOJI'S PHARMACY Data Entry Search for Rx and Refills")
+    person = module.classify_ocr_surface("Vibindas Asokakumar (UST, IN)")
+
+    assert app["ocrClass"] == "application"
+    assert app["appOcrScore"] > 0
+    assert person["ocrClass"] == "non-application"
+
+
+def test_frame_recommendation_groups_prune_weak_non_application_candidates() -> None:
+    module = load_module(PROCESS_RECORDING_SCRIPT, "process_recording_frame_groups")
+    images = [
+        {
+            "frameId": "app",
+            "ocrClass": "application",
+            "frameEvidenceScore": 0.74,
+            "visualQualityScore": 0.8,
+            "blurState": "sharp",
+            "timestampSeconds": 20.0,
+        },
+        {
+            "frameId": "backup",
+            "ocrClass": "application",
+            "frameEvidenceScore": 0.5,
+            "visualQualityScore": 0.7,
+            "blurState": "sharp",
+            "timestampSeconds": 30.0,
+        },
+        {
+            "frameId": "teams",
+            "ocrClass": "non-application",
+            "ocrNonApplication": True,
+            "frameEvidenceScore": 0.7,
+            "visualQualityScore": 0.8,
+            "timestampSeconds": 10.0,
+        },
+    ]
+
+    grouped = module.assign_frame_recommendation_groups(images)
+    by_id = {image["frameId"]: image for image in grouped}
+
+    assert by_id["app"]["recommendationGroup"] == "recommended"
+    assert by_id["backup"]["recommendationGroup"] == "alternate"
+    assert by_id["teams"]["recommendationGroup"] == "system-rejected"
+    assert by_id["teams"]["penalties"]
+
+
+def test_segment_quality_creates_screenshot_gap_when_no_recommended_frame() -> None:
+    module = load_module(PROCESS_RECORDING_SCRIPT, "process_recording_segment_quality")
+    segment = {
+        "id": "seg-0001",
+        "start": "00:00:10.000",
+        "end": "00:00:20.000",
+        "startSeconds": 10.0,
+        "endSeconds": 20.0,
+    }
+    quality = module.build_segment_quality(
+        segment,
+        {"transcript": 0.92, "ocr": 0.4, "frameSelection": 0.3, "overall": 0.6, "needsHumanReview": True},
+        [{"frameId": "teams", "recommendationGroup": "system-rejected", "ocrNonApplication": True}],
+        [],
+    )
+
+    assert quality["qualityLabel"] == "needs-review"
+    assert quality["reviewPriority"] == "high"
+    assert quality["screenshotGap"]["needsBetterScreenshot"] is True
+    assert any(label["id"] == "missing-recommended-screenshot" for label in quality["qualityLabels"])
+
+
+def test_detect_recording_content_type_identifies_application_workflow() -> None:
+    module = load_module(PROCESS_RECORDING_SCRIPT, "process_recording_content_type")
+    segments = [
+        {
+            "speakerText": "Click save, open the refill request, and submit it.",
+            "actionHints": ["click", "submit"],
+            "candidateImages": [{"ocrClass": "application"}],
+        },
+        {
+            "speakerText": "Select the pharmacy profile and save the plan.",
+            "actionHints": ["select", "save"],
+            "candidateImages": [{"ocrClass": "application"}],
+        },
+    ]
+
+    classification = module.detect_recording_content_type(segments, {"source": "sidecar-transcript"})
+
+    assert classification["type"] == "application-workflow"
+    assert classification["confidence"] > 0.7
+
+
 def test_generate_draft_attaches_screenshot_references_to_model_steps() -> None:
     module = load_module(GUIDE_DRAFT_SCRIPT, "generate_guide_draft_screenshots")
     draft = {
@@ -1597,6 +2217,9 @@ def test_generate_draft_attaches_screenshot_references_to_model_steps() -> None:
                         "timestamp": "00:01:00.000",
                         "timestampSeconds": 60.0,
                         "score": 0.81,
+                        "frameEvidenceScore": 0.72,
+                        "visualQualityScore": 0.88,
+                        "ocrClass": "application",
                         "created": True,
                         "reviewStatus": "pending",
                     }
@@ -1610,6 +2233,9 @@ def test_generate_draft_attaches_screenshot_references_to_model_steps() -> None:
 
     assert step["screenshotRef"] == "frame-0002"
     assert step["selectedScreenshot"]["frameId"] == "frame-0002"
+    assert step["selectedScreenshot"]["frameEvidenceScore"] == 0.72
+    assert step["selectedScreenshot"]["visualQualityScore"] == 0.88
+    assert step["selectedScreenshot"]["ocrClass"] == "application"
     assert step["selectedScreenshot"]["path"].endswith("samples/processed/demo-session/frames/candidates/frame-0002.jpg")
 
 
@@ -1669,6 +2295,46 @@ def test_generate_draft_distributes_screenshots_when_model_omits_source_segments
     assert [step["screenshotRef"] for step in enriched["steps"]] == ["frame-0001", "frame-0002", "frame-0003"]
 
 
+def test_generate_draft_avoids_reusing_screenshot_when_alternative_exists() -> None:
+    module = load_module(GUIDE_DRAFT_SCRIPT, "generate_guide_draft_no_reuse")
+    draft = {
+        "steps": [
+            {"instruction": "First action.", "sourceSegments": ["seg-0001"]},
+            {"instruction": "Second action.", "sourceSegments": ["seg-0001"]},
+        ]
+    }
+    trace = {
+        "sessionId": "demo-session",
+        "segments": [
+            {
+                "id": "seg-0001",
+                "candidateImages": [
+                    {
+                        "frameId": "frame-best",
+                        "path": "frames/candidates/frame-best.jpg",
+                        "timestampSeconds": 60.0,
+                        "frameEvidenceScore": 0.9,
+                        "score": 0.9,
+                        "created": True,
+                    },
+                    {
+                        "frameId": "frame-second",
+                        "path": "frames/candidates/frame-second.jpg",
+                        "timestampSeconds": 80.0,
+                        "frameEvidenceScore": 0.75,
+                        "score": 0.75,
+                        "created": True,
+                    },
+                ],
+            }
+        ],
+    }
+
+    enriched = module.attach_screenshot_references(draft, trace)
+
+    assert [step["screenshotRef"] for step in enriched["steps"]] == ["frame-best", "frame-second"]
+
+
 def test_generate_draft_applies_frame_review_file_to_trace(tmp_path: Path) -> None:
     module = load_module(GUIDE_DRAFT_SCRIPT, "generate_guide_draft_frame_review")
     trace_path = tmp_path / "procedure_trace.json"
@@ -1685,6 +2351,15 @@ def test_generate_draft_applies_frame_review_file_to_trace(tmp_path: Path) -> No
                         "score": 0.9,
                         "created": True,
                         "selectionReason": "Added by reviewer.",
+                        "frameEvidenceScore": 0.91,
+                        "ocrConfidence": 0.88,
+                        "ocrRelevanceScore": 0.8,
+                        "ocrClass": "application",
+                        "ocrText": "Submit Refill Request",
+                        "contentType": "application",
+                        "recommendationGroup": "recommended",
+                        "selectionDecision": "recommended",
+                        "recommendationReason": "Best manual screenshot candidate.",
                     }
                 ]
             }
@@ -1736,6 +2411,9 @@ def test_generate_draft_applies_frame_review_file_to_trace(tmp_path: Path) -> No
     assert images[1]["frameId"] == "review-frame-0001"
     assert images[1]["reviewStatus"] == "approved"
     assert images[1]["reviewNote"] == "Use this dialog."
+    assert images[1]["ocrText"] == "Submit Refill Request"
+    assert images[1]["ocrClass"] == "application"
+    assert images[1]["recommendationGroup"] == "recommended"
 
 
 @pytest.mark.parametrize(
