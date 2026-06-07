@@ -17,7 +17,9 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
+import uuid
 import xml.etree.ElementTree as ET
 from http.cookies import SimpleCookie
 from http import HTTPStatus
@@ -47,6 +49,7 @@ DEFAULT_AUTH_SCOPES = "openid profile"
 CLOUD_AUTH_API_PATHS = {
     "/api/usage-summary",
     "/api/generate-draft",
+    "/api/generation-jobs",
     "/api/migrate-usage",
     "/api/report-page-count",
 }
@@ -65,6 +68,13 @@ REDACTION_PATTERNS = [
 ]
 JWKS_CACHE: dict[str, Any] = {"url": "", "expires": 0.0, "keys": []}
 PROCESS_RECORDING_MODULE: Any | None = None
+GENERATION_JOBS: dict[str, dict[str, Any]] = {}
+GENERATION_JOBS_LOCK = threading.Lock()
+GENERATION_EXECUTION_LOCK = threading.Lock()
+
+
+def utc_timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 def load_env_file(path: Path) -> None:
@@ -151,6 +161,10 @@ class KCXDocumentorHandler(BaseHTTPRequestHandler):
                 params = parse_qs(parsed.query)
                 self.send_json(read_usage_summary(first_query_value(params, "range") or "day", bearer_token=self.bearer_token()))
                 return
+            if parsed.path == "/api/generation-jobs":
+                params = parse_qs(parsed.query)
+                self.send_json({"job": read_local_generation_job(first_query_value(params, "jobId"))})
+                return
             if parsed.path == "/api/session":
                 params = parse_qs(parsed.query)
                 session_id = first_query_value(params, "sessionId")
@@ -211,6 +225,9 @@ class KCXDocumentorHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/generate-draft":
                 self.send_json(generate_draft(body, bearer_token=self.bearer_token()))
+                return
+            if parsed.path == "/api/generation-jobs":
+                self.send_json(start_local_generation_job(body, bearer_token=self.bearer_token()), status=HTTPStatus.ACCEPTED)
                 return
             if parsed.path == "/api/migrate-usage":
                 self.send_json(migrate_usage_records(bearer_token=self.bearer_token()))
@@ -596,6 +613,140 @@ def process_recording(body: dict[str, Any]) -> dict[str, Any]:
     return response
 
 
+def start_local_generation_job(body: dict[str, Any], bearer_token: str = "") -> dict[str, Any]:
+    session_dir = require_session_dir(body.get("sessionId"))
+    job_id = uuid.uuid4().hex
+    token_estimate = estimate_generation_tokens(session_dir)
+    job = {
+        "jobId": job_id,
+        "sessionId": session_dir.name,
+        "status": "queued",
+        "phase": "queued",
+        "message": "Guide creation is queued on this workstation.",
+        "createdAt": utc_timestamp(),
+        "updatedAt": utc_timestamp(),
+        "tokenEstimate": token_estimate,
+        "result": {},
+        "error": "",
+    }
+    with GENERATION_JOBS_LOCK:
+        GENERATION_JOBS[job_id] = job
+    thread = threading.Thread(
+        target=run_local_generation_job,
+        args=(job_id, {"sessionId": session_dir.name}, bearer_token),
+        name=f"kcxdoc-generation-{job_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
+    return {"job": public_generation_job(job)}
+
+
+def read_local_generation_job(job_id: str | None) -> dict[str, Any]:
+    if not job_id:
+        raise HttpError(HTTPStatus.BAD_REQUEST, "jobId is required.")
+    with GENERATION_JOBS_LOCK:
+        job = GENERATION_JOBS.get(job_id)
+    if not job:
+        raise HttpError(HTTPStatus.NOT_FOUND, "Generation job was not found on this workstation.")
+    return public_generation_job(job)
+
+
+def run_local_generation_job(job_id: str, body: dict[str, Any], bearer_token: str) -> None:
+    update_local_generation_job(job_id, status="queued", phase="queued", message="Waiting for local guide-generation capacity.")
+    with GENERATION_EXECUTION_LOCK:
+        try:
+            update_local_generation_job(job_id, status="running", phase="draft", message="Queued with Azure AI capacity; generating the guide draft.")
+            draft = generate_draft(body, bearer_token=bearer_token)
+            update_local_generation_job(
+                job_id,
+                status="running",
+                phase="docx",
+                message="AI draft returned. Building the Word guide.",
+                result={"draft": draft},
+            )
+            docx = build_docx(body, bearer_token=bearer_token)
+            update_local_generation_job(
+                job_id,
+                status="running",
+                phase="qa",
+                message="Word guide built. Running local QA checks.",
+                result={"draft": draft, "docx": docx},
+            )
+            qa = qa_docx(body)
+            update_local_generation_job(
+                job_id,
+                status="succeeded",
+                phase="complete",
+                message="Guide ready. DOCX built and local QA completed.",
+                completedAt=utc_timestamp(),
+                result={"draft": draft, "docx": docx, "qa": qa},
+            )
+        except Exception as exc:  # noqa: BLE001 - stored for UI diagnostics without leaking a traceback.
+            update_local_generation_job(
+                job_id,
+                status="failed",
+                phase="failed",
+                message=f"Guide creation failed: {exc}",
+                error=str(exc),
+                completedAt=utc_timestamp(),
+            )
+
+
+def update_local_generation_job(job_id: str, **updates: Any) -> None:
+    with GENERATION_JOBS_LOCK:
+        job = GENERATION_JOBS.get(job_id)
+        if not job:
+            return
+        result_updates = updates.pop("result", None)
+        if isinstance(result_updates, dict):
+            merged_result = dict(job.get("result") or {})
+            merged_result.update(result_updates)
+            job["result"] = merged_result
+        job.update(updates)
+        job["updatedAt"] = utc_timestamp()
+
+
+def public_generation_job(job: dict[str, Any]) -> dict[str, Any]:
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    return {
+        "jobId": job.get("jobId", ""),
+        "sessionId": job.get("sessionId", ""),
+        "status": job.get("status", ""),
+        "phase": job.get("phase", ""),
+        "message": job.get("message", ""),
+        "createdAt": job.get("createdAt", ""),
+        "updatedAt": job.get("updatedAt", ""),
+        "completedAt": job.get("completedAt", ""),
+        "tokenEstimate": job.get("tokenEstimate", {}),
+        "error": job.get("error", ""),
+        "draft": result.get("draft"),
+        "docx": result.get("docx"),
+        "qa": result.get("qa"),
+    }
+
+
+def estimate_generation_tokens(session_dir: Path) -> dict[str, Any]:
+    trace_path = session_dir / "procedure_trace.json"
+    prompt_path = WORKSPACE / "prompts" / "guide_draft_system.md"
+    trace_chars = len(trace_path.read_text(encoding="utf-8")) if trace_path.exists() else 0
+    prompt_chars = len(prompt_path.read_text(encoding="utf-8")) if prompt_path.exists() else 0
+    estimated_input_tokens = math.ceil((trace_chars + prompt_chars) / 4)
+    expected_output_tokens = int(os.environ.get("KCXDOC_EXPECTED_OUTPUT_TOKENS", "12000") or 12000)
+    tpm_limit = int(os.environ.get("KCXDOC_FOUNDRY_TPM_LIMIT", "80000") or 80000)
+    scheduling_target = int(os.environ.get("KCXDOC_FOUNDRY_TPM_TARGET", "70000") or 70000)
+    return {
+        "method": "chars_per_4",
+        "traceCharacters": trace_chars,
+        "systemPromptCharacters": prompt_chars,
+        "estimatedInputTokens": estimated_input_tokens,
+        "expectedOutputTokens": expected_output_tokens,
+        "estimatedTotalTokens": estimated_input_tokens + expected_output_tokens,
+        "tpmLimit": tpm_limit,
+        "schedulingTargetTokens": scheduling_target,
+        "overSchedulingTarget": estimated_input_tokens + expected_output_tokens > scheduling_target,
+    }
+
+
 def generate_draft(body: dict[str, Any], bearer_token: str = "") -> dict[str, Any]:
     session_dir = require_session_dir(body.get("sessionId"))
     trace_path = session_dir / "procedure_trace.json"
@@ -619,6 +770,7 @@ def generate_draft(body: dict[str, Any], bearer_token: str = "") -> dict[str, An
         if not bearer_token:
             raise HttpError(HTTPStatus.UNAUTHORIZED, "A signed-in user bearer token is required to create guides through the AI proxy.")
         extra_env["KCXDOC_REMOTE_API_BEARER_TOKEN"] = bearer_token
+        extra_env["KCXDOC_REMOTE_GENERATION_MODE"] = "async"
     result = run_command(command, extra_env=extra_env)
     response = {"command": command_summary(command), "draft": relative_to_workspace(output), "result": result}
     if output.exists():

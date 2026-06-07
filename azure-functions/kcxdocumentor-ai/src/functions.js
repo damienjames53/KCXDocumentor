@@ -1,8 +1,9 @@
 import { app } from "@azure/functions";
 import { CosmosClient } from "@azure/cosmos";
 import { DefaultAzureCredential } from "@azure/identity";
+import { QueueClient } from "@azure/storage-queue";
 import { createRemoteJWKSet, decodeProtectedHeader, jwtVerify } from "jose";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 const DEFAULT_MODEL = "claude-sonnet-4-6";
 const INPUT_COST_PER_MILLION = 3.0;
@@ -11,6 +12,7 @@ const ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages";
 const FOUNDRY_MESSAGES_PATH = "/anthropic/v1/messages";
 
 let cosmosContainerPromise;
+let queueClientPromise;
 let jwks;
 
 app.http("generateDraft", {
@@ -62,6 +64,147 @@ app.http("generateDraft", {
       await upsertUsageRecord(report);
       context.error(error);
       return jsonResponse({ error: report.errorMessage, generationReport: report }, error.statusCode || 502);
+    }
+  },
+});
+
+app.http("generationJobs", {
+  methods: ["POST"],
+  authLevel: "anonymous",
+  route: "generation-jobs",
+  handler: async (request, context) => {
+    const userOrResponse = await authenticatedUserOrResponse(request);
+    if (userOrResponse.response) {
+      return userOrResponse.response;
+    }
+    const user = userOrResponse.user;
+    const body = await request.json();
+    const anthropicPayload = body?.anthropic;
+    if (!anthropicPayload || typeof anthropicPayload !== "object") {
+      return jsonResponse({ error: "Request body must include anthropic payload." }, 400);
+    }
+
+    const metadata = body?.metadata && typeof body.metadata === "object" ? body.metadata : {};
+    const model = String(anthropicPayload.model || metadata.model || DEFAULT_MODEL);
+    const now = utcTimestamp();
+    const tokenEstimate = estimatePayloadTokens(anthropicPayload);
+    const job = generationJob({
+      status: "queued",
+      message: "Queued for AI capacity.",
+      user,
+      metadata,
+      model,
+      tokenEstimate,
+      anthropicPayload: { ...anthropicPayload, model },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await upsertGenerationJob(job);
+    const queue = await generationQueueClient();
+    await queue.sendMessage(JSON.stringify({
+      jobId: job.jobId,
+      partitionKey: job.partitionKey,
+    }));
+    context.log(`Queued generation job ${job.jobId} for session ${job.sessionId || "(unknown)"}.`);
+    return jsonResponse({ job: publicGenerationJob(job) }, 202);
+  },
+});
+
+app.http("generationJobStatus", {
+  methods: ["GET"],
+  authLevel: "anonymous",
+  route: "generation-jobs/{jobId}",
+  handler: async (request) => {
+    const userOrResponse = await authenticatedUserOrResponse(request);
+    if (userOrResponse.response) {
+      return userOrResponse.response;
+    }
+    const jobId = request.params.jobId;
+    const job = await readGenerationJob(jobId);
+    if (!job) {
+      return jsonResponse({ error: "Generation job not found." }, 404);
+    }
+    if (!canReadJob(job, userOrResponse.user)) {
+      return jsonResponse({ error: "Generation job is not available to the signed-in user." }, 403);
+    }
+    return jsonResponse({ job: publicGenerationJob(job) });
+  },
+});
+
+app.storageQueue("processGenerationJob", {
+  queueName: process.env.KCXDOC_GENERATION_QUEUE_NAME || "kcxdocumentor-generation-jobs",
+  connection: "AzureWebJobsStorage",
+  handler: async (message, context) => {
+    const pointer = typeof message === "string" ? safeJsonParse(message) : message;
+    const jobId = pointer?.jobId;
+    if (!jobId) {
+      context.error("Generation queue message did not include a jobId.");
+      return;
+    }
+    let job = await readGenerationJob(jobId);
+    if (!job) {
+      context.error(`Generation job ${jobId} was not found.`);
+      return;
+    }
+    if (["succeeded", "failed", "cancelled"].includes(job.status)) {
+      context.log(`Generation job ${jobId} is already ${job.status}; skipping.`);
+      return;
+    }
+
+    const generatedAt = utcTimestamp();
+    job = await patchGenerationJob(job, {
+      status: "generating",
+      message: "AI guide generation is running.",
+      startedAt: job.startedAt || generatedAt,
+      updatedAt: generatedAt,
+    });
+
+    try {
+      const model = String(job.model || DEFAULT_MODEL);
+      const result = await callClaude(job.anthropicPayload || {});
+      const report = generationReport({
+        status: "succeeded",
+        generatedAt,
+        metadata: job.metadata || {},
+        model,
+        usage: normalizeUsage(result.usage, model),
+        provider: aiProviderName(),
+        user: job.generatedBy || job.user || {},
+      });
+      await upsertUsageRecord(report);
+      await patchGenerationJob(job, {
+        status: "succeeded",
+        message: "AI guide draft is ready.",
+        completedAt: utcTimestamp(),
+        updatedAt: utcTimestamp(),
+        anthropicResult: result,
+        generationReport: report,
+        usage: report.usage,
+      });
+    } catch (error) {
+      const model = String(job.model || DEFAULT_MODEL);
+      const report = generationReport({
+        status: "failed",
+        generatedAt,
+        metadata: job.metadata || {},
+        model,
+        usage: normalizeUsage(error?.anthropicResult?.usage, model),
+        provider: aiProviderName(),
+        user: job.generatedBy || job.user || {},
+        errorMessage: error.message || "AI generation job failed.",
+      });
+      await upsertUsageRecord(report);
+      await patchGenerationJob(job, {
+        status: "failed",
+        message: report.errorMessage,
+        completedAt: utcTimestamp(),
+        updatedAt: utcTimestamp(),
+        errorMessage: report.errorMessage,
+        generationReport: report,
+        usage: report.usage,
+      });
+      context.error(error);
     }
   },
 });
@@ -235,6 +378,55 @@ async function upsertUsageRecord(report) {
   });
 }
 
+async function upsertGenerationJob(job) {
+  const container = await cosmosContainer();
+  await container.items.upsert({
+    ...job,
+    id: job.jobId,
+    partitionKey: job.partitionKey,
+    documentType: "generationJob",
+  });
+}
+
+async function readGenerationJob(jobId) {
+  const container = await cosmosContainer();
+  const { resources } = await container.items
+    .query({
+      query: "SELECT * FROM c WHERE c.documentType = 'generationJob' AND c.jobId = @jobId",
+      parameters: [{ name: "@jobId", value: String(jobId || "") }],
+    })
+    .fetchAll();
+  return resources[0] || null;
+}
+
+async function patchGenerationJob(job, updates) {
+  const updated = {
+    ...job,
+    ...updates,
+    id: job.jobId,
+    partitionKey: job.partitionKey,
+    documentType: "generationJob",
+  };
+  await upsertGenerationJob(updated);
+  return updated;
+}
+
+async function generationQueueClient() {
+  if (!queueClientPromise) {
+    queueClientPromise = (async () => {
+      const queueName = process.env.KCXDOC_GENERATION_QUEUE_NAME || "kcxdocumentor-generation-jobs";
+      const connectionString = process.env.KCXDOC_GENERATION_QUEUE_CONNECTION || process.env.AzureWebJobsStorage;
+      if (!connectionString) {
+        throw new Error("AzureWebJobsStorage or KCXDOC_GENERATION_QUEUE_CONNECTION is required for generation queueing.");
+      }
+      const client = QueueClient.fromConnectionString(connectionString, queueName);
+      await client.createIfNotExists();
+      return client;
+    })();
+  }
+  return queueClientPromise;
+}
+
 async function readUsageRecords() {
   const container = await cosmosContainer();
   const { resources } = await container.items
@@ -253,10 +445,88 @@ async function cosmosContainer() {
         endpoint,
         aadCredentials: new DefaultAzureCredential(),
       });
-      return client.database(databaseName).container(containerName);
+  return client.database(databaseName).container(containerName);
     })();
   }
   return cosmosContainerPromise;
+}
+
+function generationJob({ status, message, user, metadata, model, tokenEstimate, anthropicPayload, createdAt, updatedAt }) {
+  const generatedBy = normalizedGeneratedBy(user);
+  const sessionId = String(metadata.sessionId || "");
+  const jobId = String(metadata.generationJobId || randomUUID());
+  const partitionKey = usagePartitionKey(createdAt);
+  return {
+    schemaVersion: 1,
+    documentType: "generationJob",
+    id: jobId,
+    jobId,
+    partitionKey,
+    status,
+    message,
+    createdAt,
+    updatedAt,
+    sessionId,
+    title: String(metadata.title || ""),
+    model,
+    provider: aiProviderName(),
+    promptVersion: String(metadata.promptVersion || ""),
+    metadata,
+    tokenEstimate,
+    generatedBy,
+    user: generatedBy,
+    anthropicPayload,
+  };
+}
+
+function publicGenerationJob(job) {
+  const publicJob = {
+    jobId: job.jobId,
+    status: job.status,
+    message: job.message || "",
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    startedAt: job.startedAt,
+    completedAt: job.completedAt,
+    sessionId: job.sessionId || "",
+    title: job.title || "",
+    model: job.model || "",
+    provider: job.provider || "",
+    promptVersion: job.promptVersion || "",
+    tokenEstimate: job.tokenEstimate || {},
+    usage: job.usage || job.generationReport?.usage || {},
+    errorMessage: job.errorMessage || "",
+    generationReport: job.generationReport || null,
+  };
+  if (job.status === "succeeded") {
+    publicJob.anthropicResult = job.anthropicResult || {};
+  }
+  return publicJob;
+}
+
+function canReadJob(job, user) {
+  const owner = normalizedGeneratedBy(job.generatedBy || job.user || {});
+  const current = normalizedGeneratedBy(user);
+  if (!owner.oid && !owner.username) return true;
+  return Boolean(
+    (owner.oid && current.oid && owner.oid === current.oid)
+      || (owner.username && current.username && owner.username.toLowerCase() === current.username.toLowerCase()),
+  );
+}
+
+function estimatePayloadTokens(payload) {
+  const serialized = JSON.stringify(payload || {});
+  const estimatedInputTokens = Math.ceil(serialized.length / 4);
+  const expectedOutputTokens = Number(payload?.max_tokens || process.env.KCXDOC_EXPECTED_OUTPUT_TOKENS || 12000) || 12000;
+  return {
+    method: "chars_per_4",
+    estimatedInputTokens,
+    expectedOutputTokens,
+    estimatedTotalTokens: estimatedInputTokens + expectedOutputTokens,
+    characterCount: serialized.length,
+    tpmLimit: Number(process.env.KCXDOC_FOUNDRY_TPM_LIMIT || 80000) || 80000,
+    schedulingTargetTokens: Number(process.env.KCXDOC_FOUNDRY_TPM_TARGET || 70000) || 70000,
+  };
 }
 
 function generationReport({ status, generatedAt, metadata, model, usage, user, provider = "anthropic", errorMessage = "" }) {

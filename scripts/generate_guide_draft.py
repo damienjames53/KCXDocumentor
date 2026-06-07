@@ -8,6 +8,7 @@ import os
 import re
 import sqlite3
 import sys
+import time
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -443,19 +444,10 @@ def generate_with_remote_proxy(trace: dict[str, Any], args: argparse.Namespace, 
             "promptVersion": args.prompt_version,
         },
     }
-    req = request.Request(
-        f"{base_url}/api/generate-draft",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Accept": "application/json",
-            "Authorization": f"Bearer {bearer_token}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
     try:
-        with request.urlopen(req, timeout=240) as response:
-            result = json.loads(response.read().decode("utf-8"))
+        if os.environ.get("KCXDOC_REMOTE_GENERATION_MODE", "").strip().lower() == "async":
+            return generate_with_remote_job(trace, args, base_url, bearer_token, payload)
+        return parse_remote_generation_result(trace, args, post_remote_generation(base_url, bearer_token, payload))
     except error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         report = remote_failure_report(trace, args, exc.code, detail)
@@ -469,6 +461,108 @@ def generate_with_remote_proxy(trace: dict[str, Any], args: argparse.Namespace, 
         )
         raise AnthropicDraftError(report["errorMessage"], report) from exc
 
+
+def post_remote_generation(base_url: str, bearer_token: str, payload: dict[str, Any]) -> dict[str, Any]:
+    req = request.Request(
+        f"{base_url}/api/generate-draft",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {bearer_token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=240) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except error.HTTPError:
+        raise
+    except (TimeoutError, error.URLError, OSError):
+        raise
+
+
+def generate_with_remote_job(
+    trace: dict[str, Any],
+    args: argparse.Namespace,
+    base_url: str,
+    bearer_token: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    job = submit_remote_generation_job(base_url, bearer_token, payload)
+    job_id = str(job.get("jobId") or "")
+    if not job_id:
+        report = generation_failure_report(
+            trace=trace,
+            args=args,
+            result={},
+            error_message="Remote AI proxy did not return a generation job id.",
+        )
+        raise AnthropicDraftError(report["errorMessage"], report)
+    timeout_seconds = int(os.environ.get("KCXDOC_REMOTE_GENERATION_TIMEOUT_SECONDS", "1200") or 1200)
+    poll_seconds = max(1, int(os.environ.get("KCXDOC_REMOTE_GENERATION_POLL_SECONDS", "3") or 3))
+    deadline = time.monotonic() + timeout_seconds
+    last_job = job
+    while time.monotonic() < deadline:
+        status = str(last_job.get("status") or "").lower()
+        if status == "succeeded":
+            return parse_remote_generation_result(trace, args, {
+                "anthropicResult": last_job.get("anthropicResult") or {},
+                "generationReport": last_job.get("generationReport") or {},
+            })
+        if status == "failed":
+            report = last_job.get("generationReport") if isinstance(last_job.get("generationReport"), dict) else {}
+            if report:
+                raise AnthropicDraftError(report.get("errorMessage") or "Remote AI generation job failed.", report)
+            report = generation_failure_report(
+                trace=trace,
+                args=args,
+                result={},
+                error_message=str(last_job.get("errorMessage") or last_job.get("message") or "Remote AI generation job failed."),
+            )
+            raise AnthropicDraftError(report["errorMessage"], report)
+        time.sleep(poll_seconds)
+        last_job = read_remote_generation_job(base_url, bearer_token, job_id)
+    report = generation_failure_report(
+        trace=trace,
+        args=args,
+        result={},
+        error_message=f"Remote AI generation job {job_id} did not finish within {timeout_seconds} seconds.",
+    )
+    raise AnthropicDraftError(report["errorMessage"], report)
+
+
+def submit_remote_generation_job(base_url: str, bearer_token: str, payload: dict[str, Any]) -> dict[str, Any]:
+    req = request.Request(
+        f"{base_url}/api/generation-jobs",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {bearer_token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with request.urlopen(req, timeout=60) as response:
+        result = json.loads(response.read().decode("utf-8"))
+    return result.get("job") if isinstance(result.get("job"), dict) else {}
+
+
+def read_remote_generation_job(base_url: str, bearer_token: str, job_id: str) -> dict[str, Any]:
+    req = request.Request(
+        f"{base_url}/api/generation-jobs/{job_id}",
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {bearer_token}",
+        },
+        method="GET",
+    )
+    with request.urlopen(req, timeout=60) as response:
+        result = json.loads(response.read().decode("utf-8"))
+    return result.get("job") if isinstance(result.get("job"), dict) else {}
+
+
+def parse_remote_generation_result(trace: dict[str, Any], args: argparse.Namespace, result: dict[str, Any]) -> dict[str, Any]:
     anthropic_result = result.get("anthropicResult") if isinstance(result.get("anthropicResult"), dict) else {}
     generation_report = result.get("generationReport") if isinstance(result.get("generationReport"), dict) else {}
     text = extract_text_response(anthropic_result)
@@ -490,7 +584,10 @@ def generate_with_remote_proxy(trace: dict[str, Any], args: argparse.Namespace, 
             report["model"] = proxy_report.get("model") or report["model"]
             report["provider"] = proxy_report.get("provider") or report["provider"]
             report["promptVersion"] = proxy_report.get("promptVersion") or report["promptVersion"]
-        post_remote_usage_record(base_url, bearer_token, report)
+        base_url = os.environ.get("KCXDOC_REMOTE_API_BASE_URL", "").strip().rstrip("/")
+        bearer_token = os.environ.get("KCXDOC_REMOTE_API_BEARER_TOKEN", "").strip()
+        if base_url and bearer_token:
+            post_remote_usage_record(base_url, bearer_token, report)
         raise AnthropicDraftError(report.get("errorMessage") or f"Remote AI proxy returned invalid guide JSON: {exc}", report) from exc
     if isinstance(draft, dict) and isinstance(draft.get("guideDraft"), dict):
         wrapper_model = draft.get("model") if isinstance(draft.get("model"), dict) else {}

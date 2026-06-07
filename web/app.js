@@ -41,6 +41,8 @@ const state = {
   operationMessages: [],
   operationMessageIndex: 0,
   operationTimer: null,
+  generationJob: null,
+  generationJobPollTimer: null,
 };
 
 const AI_CREATE_MESSAGES = [
@@ -643,18 +645,13 @@ async function generateDraft() {
   setOperation("Starting AI guide creation...", AI_CREATE_MESSAGES);
   setBusy(true);
   try {
-    setOperation("Reading the walkthrough and building the guide structure...", AI_CREATE_MESSAGES);
-    const draftResult = await cloudApiPost("/api/generate-draft", { sessionId });
-    assertCommandSucceeded(draftResult, "AI draft generation");
-    logActivity("Anthropic draft generated.");
-    state.session = mergeSessionResult(state.session, draftResult);
-    await refreshSessionState(sessionId);
-
-    setOperation("Building the Word guide from the AI draft...", AI_CREATE_MESSAGES);
-    await buildDocxForSession(sessionId);
-
-    setOperation("Running local QA checks on the Word guide...", AI_CREATE_MESSAGES);
-    await runDocxQaForSession(sessionId);
+    setOperation("Submitting guide job and checking the prompt size...", AI_CREATE_MESSAGES);
+    const submission = await cloudApiPost("/api/generation-jobs", { sessionId });
+    const job = submission?.job || {};
+    if (!job.jobId) throw new Error("The server did not return a generation job id.");
+    state.generationJob = job;
+    logActivity(`Guide job queued${formatTokenEstimate(job.tokenEstimate)}.`);
+    await pollGenerationJob(job.jobId, sessionId);
 
     await loadUsageSummary({ silent: true });
     await loadCurrentMonthSpend({ silent: true });
@@ -668,9 +665,42 @@ async function generateDraft() {
   } finally {
     setBusy(false);
     window.setTimeout(() => {
-      if (!state.busy) setOperation("");
+    if (!state.busy) setOperation("");
     }, 2500);
   }
+}
+
+async function pollGenerationJob(jobId, sessionId) {
+  const pollDelayMs = 2500;
+  while (true) {
+    const payload = await cloudApiGet(`/api/generation-jobs?jobId=${encodeURIComponent(jobId)}`);
+    const job = payload?.job || {};
+    state.generationJob = job;
+    const message = job.message || "Guide creation is running.";
+    setOperation(message, AI_CREATE_MESSAGES);
+    if (job.status === "succeeded") {
+      if (job.draft) state.session = mergeSessionResult(state.session, job.draft);
+      if (job.docx) state.session = mergeSessionResult(state.session, job.docx);
+      if (job.qa) {
+        state.session = mergeSessionResult(state.session, {
+          qa: {
+            normal: job.qa,
+            strict: null,
+          },
+        });
+      }
+      await refreshSessionState(sessionId);
+      return job;
+    }
+    if (job.status === "failed") {
+      throw new Error(job.error || job.message || "Guide creation failed.");
+    }
+    await sleep(pollDelayMs);
+  }
+}
+
+function sleep(milliseconds) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
 async function buildDocxForSession(sessionId) {
@@ -2679,6 +2709,14 @@ function formatPageCount(value) {
 function formatCostPerPage(value, pageCount) {
   const pages = Number(pageCount || 0);
   return Number.isFinite(pages) && pages > 0 ? formatCost(value) || "--" : "--";
+}
+
+function formatTokenEstimate(estimate) {
+  const total = Number(estimate?.estimatedTotalTokens || 0);
+  if (!Number.isFinite(total) || total <= 0) return "";
+  const target = Number(estimate?.schedulingTargetTokens || 0);
+  const warning = target && total > target ? " and may wait for AI capacity" : "";
+  return ` with an estimated ${formatNumber(total)} tokens${warning}`;
 }
 
 function renderTags(values, className = "") {

@@ -1170,3 +1170,61 @@ def test_extract_review_frame_runs_ocr_and_saves_prompt_context(tmp_path: Path, 
     assert image["frameId"] == "review-frame-0008"
     assert image["ocrText"] == "Submit Refill Request"
     assert image["recommendationGroup"] == "recommended"
+
+
+def test_estimate_generation_tokens_counts_trace_and_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    workspace = tmp_path / "workspace"
+    session_dir = workspace / "samples" / "processed" / "estimate-session"
+    prompt_dir = workspace / "prompts"
+    session_dir.mkdir(parents=True)
+    prompt_dir.mkdir(parents=True)
+    (session_dir / "procedure_trace.json").write_text(json.dumps({"segments": [{"text": "A" * 200}]}), encoding="utf-8")
+    (prompt_dir / "guide_draft_system.md").write_text("B" * 100, encoding="utf-8")
+
+    monkeypatch.setattr(module, "WORKSPACE", workspace)
+    monkeypatch.setenv("KCXDOC_EXPECTED_OUTPUT_TOKENS", "5000")
+    monkeypatch.setenv("KCXDOC_FOUNDRY_TPM_LIMIT", "80000")
+    monkeypatch.setenv("KCXDOC_FOUNDRY_TPM_TARGET", "70000")
+
+    estimate = module.estimate_generation_tokens(session_dir)
+
+    assert estimate["method"] == "chars_per_4"
+    assert estimate["traceCharacters"] > 200
+    assert estimate["systemPromptCharacters"] == 100
+    assert estimate["expectedOutputTokens"] == 5000
+    assert estimate["estimatedTotalTokens"] == estimate["estimatedInputTokens"] + 5000
+    assert estimate["tpmLimit"] == 80000
+
+
+def test_local_generation_job_runs_draft_docx_and_qa(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    processed_root = tmp_path / "samples" / "processed"
+    generated_root = tmp_path / "artifacts" / "generated"
+    session_dir = processed_root / "job-session"
+    session_dir.mkdir(parents=True)
+    (session_dir / "procedure_trace.json").write_text(json.dumps({"schemaVersion": 1, "sessionId": "job-session"}), encoding="utf-8")
+
+    monkeypatch.setattr(module, "PROCESSED_ROOT", processed_root)
+    monkeypatch.setattr(module, "GENERATED_ROOT", generated_root)
+    monkeypatch.setattr(module, "estimate_generation_tokens", lambda _session_dir: {"estimatedTotalTokens": 1234})
+    monkeypatch.setattr(module, "generate_draft", lambda body, bearer_token="": {"draftSummary": {"title": "Guide"}, "result": {"returnCode": 0}})
+    monkeypatch.setattr(module, "build_docx", lambda body, bearer_token="": {"docx": "artifacts/generated/job-session/user_guide.anthropic.docx", "result": {"returnCode": 0}})
+    monkeypatch.setattr(module, "qa_docx", lambda body: {"passed": True, "result": {"returnCode": 0}})
+
+    result = module.start_local_generation_job({"sessionId": "job-session"}, bearer_token="token-123")
+    job_id = result["job"]["jobId"]
+    deadline = module.time.time() + 5
+    job = result["job"]
+    while module.time.time() < deadline:
+        job = module.read_local_generation_job(job_id)
+        if job["status"] == "succeeded":
+            break
+        module.time.sleep(0.05)
+
+    assert job["status"] == "succeeded"
+    assert job["phase"] == "complete"
+    assert job["tokenEstimate"]["estimatedTotalTokens"] == 1234
+    assert job["draft"]["draftSummary"]["title"] == "Guide"
+    assert job["docx"]["docx"].endswith("user_guide.anthropic.docx")
+    assert job["qa"]["passed"] is True

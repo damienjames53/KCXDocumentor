@@ -179,6 +179,10 @@ Runs `scripts/generate_guide_draft.py` against `samples/processed/<sessionId>/pr
 
 The underlying script sends the compact prompt payload to the Azure Function configured in `KCXDOC_REMOTE_API_BASE_URL`. The local app does not call Anthropic directly after the serverless transition. `ANTHROPIC_API_KEY` belongs on the Function App only.
 
+For the UI workflow, **Create Guide** now starts a local generation job with `POST /api/generation-jobs` and polls `GET /api/generation-jobs?jobId=<id>`. The local job runs the AI draft, DOCX build, and local QA chain in the background so the browser can show queued/running/building/QA status instead of appearing stuck.
+
+When the remote Azure Function is configured, the generator opts into the queued cloud route. The Function stores the prompt job in Cosmos DB, places a lightweight pointer on the existing Function storage queue, and the queue worker calls Azure Foundry. This protects the shared Foundry TPM limit when multiple workstations create guides at the same time.
+
 When `artifacts/generated/<sessionId>/guide_draft.anthropic.json` includes Anthropic generation metadata such as `model`, `generatedAt`, and `usage`, the local console surfaces the model, token totals, estimated cost, and timestamp in the Artifacts view and Readiness checks.
 
 The selected session's current generation token cost remains visible in the Artifacts tab after the draft metadata is available. Aggregate token reporting lives on the top-level **AI Spend** page in the main navigation, with the current calendar month spend also visible in the header.

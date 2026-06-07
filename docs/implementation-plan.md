@@ -81,6 +81,35 @@ Compliance notes:
 - For now, API-key authentication to Foundry is acceptable inside the Function App only. The longer-term preferred state is Entra-based Foundry authentication or managed identity if the Foundry deployment and SDK path support it cleanly for this Function.
 - A capacity increase above `80` currently requires a Microsoft/Azure quota request. The attempted capacity `100` update failed because quota was capped at `80` thousand TPM with `10` thousand TPM already in use at the time of the attempt.
 
+## Token-Aware Multi-User Generation Queue
+
+Multiple users can process recordings locally at the same time, but guide generation shares the Azure Foundry Claude deployment limit. The current deployment is `80 RPM / 80,000 TPM`, so the system should coordinate AI calls centrally instead of letting each workstation fire directly at the model.
+
+Implemented direction:
+
+- Keep local recording processing, OCR, frame review, DOCX rendering, and QA on each workstation.
+- Submit only the compact reviewed prompt payload to the authenticated Azure Function.
+- Use the existing Function App storage account queue for AI generation scheduling. Queue messages contain only a small job pointer, not the prompt payload.
+- Store durable generation job records in Cosmos DB with status, owner, session id, title, model, prompt version, token estimate, usage, and failure details.
+- Have the queue-trigger Function worker call Azure Foundry, write success/failure usage records, and update the job record.
+- Have the local app poll job status so users see `queued`, `generating`, `building DOCX`, `QA`, `succeeded`, or `failed` instead of a silent disabled-button state.
+- Keep the older synchronous `/api/generate-draft` route available as a compatibility endpoint while the local app opts into the queued route.
+
+Token controls:
+
+- Estimate request size before submission using a conservative character-count approximation until a provider token-count endpoint is available through the configured Foundry route.
+- Use `KCXDOC_FOUNDRY_TPM_LIMIT=80000` and a lower scheduling target such as `KCXDOC_FOUNDRY_TPM_TARGET=70000` so the queue leaves headroom for provider overhead and retries.
+- Run one active queued generation at a time until production telemetry shows the average prompt/output size safely supports more concurrency.
+- Add segmentation later for traces whose estimated prompt plus expected output exceeds the scheduling target. Segment jobs should produce section-level guide JSON and merge into one final draft before DOCX build.
+- Treat HTTP `429` and timeout failures as retryable queue-worker failures with backoff; do not let the browser retry aggressively.
+
+Cost impact:
+
+- Azure Storage Queue usage is tied to the Function storage account. It stores only small job pointer messages and should be negligible at demo volume.
+- Cosmos DB usage increases because each AI attempt writes a generation job document and updates it as the job progresses. This is metadata plus compact prompt/result JSON, not video, frames, audio, or DOCX files.
+- Under a Cosmos DB for NoSQL free-tier account with low demo volume, this should remain effectively inside the free allowance. It is not a new guaranteed-zero charge if free tier is unavailable, if another free-tier Cosmos account already exists in the subscription, or if prompt/result documents become large enough to consume meaningful RU/storage.
+- Raw recordings, screenshots, DOCX artifacts, and QA output remain local and do not add Cosmos storage cost.
+
 ## Document Quality Findings
 
 Visual review of the generated DOCX artifacts showed that guide prose has improved, but screenshot selection is still the main publication-quality risk.
