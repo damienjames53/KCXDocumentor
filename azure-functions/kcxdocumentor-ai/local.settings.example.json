@@ -3,7 +3,11 @@
   "Values": {
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
     "FUNCTIONS_WORKER_RUNTIME": "node",
-    "ANTHROPIC_API_KEY": "__SET_ME_IN_AZURE_FUNCTION_APP__",
+    "KCXDOC_AI_PROVIDER": "azure-foundry",
+    "KCXDOC_FOUNDRY_RESOURCE_NAME": "foundry-kcxdocumentor-dev",
+    "KCXDOC_FOUNDRY_MESSAGES_URL": "https://foundry-kcxdocumentor-dev.services.ai.azure.com/anthropic/v1/messages",
+    "KCXDOC_FOUNDRY_API_KEY": "__SET_ME_IN_AZURE_FUNCTION_APP__",
+    "KCXDOC_ANTHROPIC_MODEL": "claude-sonnet-4-6",
     "KCXDOC_COSMOS_ENDPOINT": "https://cosmos-kcxdocumentor-dev.documents.azure.com:443/",
     "KCXDOC_COSMOS_DATABASE": "kcxdocumentor",
     "KCXDOC_COSMOS_CONTAINER": "aiUsage",

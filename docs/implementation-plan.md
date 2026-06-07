@@ -19,7 +19,7 @@ The MVP consumes pre-recorded files rather than recording the screen itself.
 7. Align transcript segments, UI text, and frame timestamps.
 8. Produce `procedure_trace.json`.
 9. Review candidate screenshots and transcript risk before any publishable AI draft is generated.
-10. Ask Anthropic Claude Sonnet 4.6 to create a structured guide draft from the reviewed trace.
+10. Ask Claude Sonnet 4.6 to create a structured guide draft from the reviewed trace through the authenticated Azure Function proxy.
 11. Render the final guide as DOCX using the local keycentrix document assets.
 12. Run deterministic artifact QA and rendered visual QA before the guide is considered usable.
 
@@ -54,9 +54,30 @@ Security controls for this local-trust model:
 
 - Docker must publish the browser port only to `127.0.0.1`.
 - The local server must keep path traversal protections, safe filename validation, and session-id validation.
-- Anthropic API keys must remain server-side in Azure Functions, never in the local browser or local `.env`.
+- AI provider keys must remain server-side in Azure Functions, never in the local browser or local `.env`.
 - AI/Cosmos calls must continue to require a valid Entra token validated by the Azure Function.
 - KCXDocumentor should not be deployed as a multi-user web server without reintroducing full server-side authorization for local artifact endpoints.
+
+## Azure Foundry And BAA Direction
+
+KCXDocumentor should move production AI generation from the first-party Anthropic API key path to Claude Sonnet 4.6 deployed through Microsoft Foundry in Azure. The goal is to keep the current local-first processing boundary while routing the compact prompt payload through Azure services covered by the organization's Microsoft commercial terms and HIPAA BAA posture.
+
+Current target architecture:
+
+- Keep raw recordings, audio, extracted frames, OCR, local traces, generated DOCX files, and QA artifacts on the workstation.
+- Keep the desktop app calling only the authenticated Azure Function for AI generation and AI Spend reporting.
+- Provision a Microsoft Foundry/Azure AI Services resource in `rg-kcxdocumentor-dev`.
+- Deploy `claude-sonnet-4-6` as a Global Standard deployment named `claude-sonnet-4-6`.
+- Configure the Function App with `KCXDOC_AI_PROVIDER=azure-foundry`, `KCXDOC_FOUNDRY_RESOURCE_NAME`, `KCXDOC_FOUNDRY_MESSAGES_URL`, `KCXDOC_FOUNDRY_API_KEY`, and `KCXDOC_ANTHROPIC_MODEL=claude-sonnet-4-6`.
+- Continue storing usage records in Cosmos DB so AI Spend reporting survives local session deletion.
+- Treat the Azure Function as the server-side policy boundary: it validates the signed-in user token, calls Foundry, records success/failure usage, and returns only the guide JSON/report to the local app.
+
+Compliance notes:
+
+- Microsoft documents that Azure HIPAA BAA terms are available through Microsoft Product Terms and the Data Protection Addendum for eligible customers, but Microsoft also states that using Azure does not automatically make the customer application HIPAA compliant.
+- Claude models in Foundry are currently preview/global-standard model deployments. Before allowing PHI-bearing production use, KCX should confirm internally that the selected Foundry model deployment, subscription type, region, and marketplace terms are acceptable under its compliance program.
+- Foundry Claude does not provide built-in content filtering at deployment time. KCXDocumentor should keep local prompt minimization, reviewer gates, QA checks, and PHI-aware operating rules in place.
+- For now, API-key authentication to Foundry is acceptable inside the Function App only. The longer-term preferred state is Entra-based Foundry authentication or managed identity if the Foundry deployment and SDK path support it cleanly for this Function.
 
 ## Document Quality Findings
 
@@ -105,7 +126,7 @@ Implemented review-gate improvements:
 | Metadata store | SQLite | Simple local session database |
 | Trace format | JSON files plus asset folder | Small, inspectable, easy to replay in tests |
 | DOCX rendering | Open XML SDK long term; local `python-docx` helper for prototype | Deterministic document output with local keycentrix styling |
-| AI provider | Anthropic Claude Sonnet 4.6 by default | Strong long-context and document-generation fit while keeping provider/model configurable |
+| AI provider | Claude Sonnet 4.6 through Microsoft Foundry for production; first-party Anthropic only for non-PHI development fallback when explicitly configured | Keeps the model capability while improving Azure/BAA alignment and centralizing provider keys in the Function App |
 | UI standard | KCXUIComponents semantic tokens and primitives | Keeps KCXDocumentor aligned with current KCX product UI conventions |
 | Local container | Docker Compose with host-mounted folders | Keeps the internal app easy to run while preserving workstation-local recordings and generated artifacts |
 
@@ -157,7 +178,7 @@ Source and artifact folders must remain host-mappable:
 - `samples/processed` maps to a local processed-session folder.
 - `artifacts` maps to a local generated-output folder.
 
-This keeps large media, generated DOCX files, QA output, and local processing artifacts outside the image and available to the user on Windows and macOS. The Azure Function remains responsible for the Anthropic proxy and persisted AI Spend data.
+This keeps large media, generated DOCX files, QA output, and local processing artifacts outside the image and available to the user on Windows and macOS. The Azure Function remains responsible for the Claude provider proxy and persisted AI Spend data.
 
 Compose must bind the app port as `127.0.0.1:8765:8765`. Binding to `0.0.0.0` would expose local recordings, screenshots, generated documents, and local processing controls to the workstation's network, which does not match the desktop-local trust model.
 
@@ -295,7 +316,8 @@ The older Anthropic Blink artifacts are retained only as evidence. They are not 
 
 - Define guide draft JSON schema.
 - Define and version the Sonnet 4.6 guide prompt.
-- Regenerate Anthropic drafts from the current canonical Blink Rx traces after transcript parser and frame-resolution fixes.
+- Regenerate Claude drafts from the current canonical Blink Rx traces after transcript parser and frame-resolution fixes.
+- Move production guide generation to Azure Foundry Claude Sonnet 4.6 by provisioning the Foundry resource/deployment in `rg-kcxdocumentor-dev` and updating the Function App provider settings.
 - Generate sectioned user-guide content from procedure traces.
 - Render DOCX using local keycentrix assets.
 - Include selected screenshots with captions and step references.

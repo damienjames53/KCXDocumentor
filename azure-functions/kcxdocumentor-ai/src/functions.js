@@ -8,6 +8,7 @@ const DEFAULT_MODEL = "claude-sonnet-4-6";
 const INPUT_COST_PER_MILLION = 3.0;
 const OUTPUT_COST_PER_MILLION = 15.0;
 const ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages";
+const FOUNDRY_MESSAGES_PATH = "/anthropic/v1/messages";
 
 let cosmosContainerPromise;
 let jwks;
@@ -34,13 +35,14 @@ app.http("generateDraft", {
     let result = {};
 
     try {
-      result = await callAnthropic({ ...anthropicPayload, model });
+      result = await callClaude({ ...anthropicPayload, model });
       const report = generationReport({
         status: "succeeded",
         generatedAt,
         metadata,
         model,
         usage: normalizeUsage(result.usage, model),
+        provider: aiProviderName(),
         user,
       });
       await upsertUsageRecord(report);
@@ -53,6 +55,7 @@ app.http("generateDraft", {
         metadata,
         model,
         usage,
+        provider: aiProviderName(),
         user,
         errorMessage: error.message || "Anthropic proxy request failed.",
       });
@@ -103,14 +106,15 @@ app.http("usageRecords", {
   },
 });
 
-async function callAnthropic(payload) {
-  const apiKey = process.env.ANTHROPIC_API_KEY || process.env.KCXDOC_ANTHROPIC_API_KEY;
+async function callClaude(payload) {
+  const provider = aiProviderName();
+  const apiKey = apiKeyForProvider(provider);
   if (!apiKey || apiKey === "__SET_ME__") {
-    const error = new Error("ANTHROPIC_API_KEY is not configured on the Function App.");
+    const error = new Error(`${apiKeySettingName(provider)} is not configured on the Function App.`);
     error.statusCode = 500;
     throw error;
   }
-  const response = await fetch(ANTHROPIC_MESSAGES_URL, {
+  const response = await fetch(messagesUrlForProvider(provider), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -123,13 +127,44 @@ async function callAnthropic(payload) {
   const data = text ? safeJsonParse(text) : {};
   if (!response.ok) {
     const message = data?.error?.message || data?.message || text || `HTTP ${response.status}`;
-    const errorType = data?.error?.type || data?.type || "anthropic_error";
-    const error = new Error(`Anthropic API request failed: HTTP ${response.status} (${errorType}): ${message}`);
+    const errorType = data?.error?.type || data?.type || `${provider}_error`;
+    const error = new Error(`Claude API request failed through ${provider}: HTTP ${response.status} (${errorType}): ${message}`);
     error.statusCode = response.status;
     error.anthropicResult = data;
     throw error;
   }
   return data;
+}
+
+function aiProviderName() {
+  return String(process.env.KCXDOC_AI_PROVIDER || "anthropic").trim().toLowerCase();
+}
+
+function apiKeyForProvider(provider) {
+  if (provider === "azure-foundry") {
+    return process.env.KCXDOC_FOUNDRY_API_KEY
+      || process.env.ANTHROPIC_FOUNDRY_API_KEY
+      || process.env.ANTHROPIC_API_KEY
+      || process.env.KCXDOC_ANTHROPIC_API_KEY;
+  }
+  return process.env.ANTHROPIC_API_KEY || process.env.KCXDOC_ANTHROPIC_API_KEY;
+}
+
+function apiKeySettingName(provider) {
+  return provider === "azure-foundry" ? "KCXDOC_FOUNDRY_API_KEY" : "ANTHROPIC_API_KEY";
+}
+
+function messagesUrlForProvider(provider) {
+  if (provider === "azure-foundry") {
+    const explicitUrl = process.env.KCXDOC_FOUNDRY_MESSAGES_URL || process.env.ANTHROPIC_FOUNDRY_MESSAGES_URL;
+    if (explicitUrl) return explicitUrl;
+    const baseUrl = process.env.KCXDOC_FOUNDRY_BASE_URL || process.env.ANTHROPIC_FOUNDRY_BASE_URL;
+    if (baseUrl) return `${baseUrl.replace(/\/+$/, "")}${FOUNDRY_MESSAGES_PATH}`;
+    const resourceName = process.env.KCXDOC_FOUNDRY_RESOURCE_NAME || process.env.ANTHROPIC_FOUNDRY_RESOURCE;
+    if (resourceName) return `https://${resourceName}.services.ai.azure.com${FOUNDRY_MESSAGES_PATH}`;
+    throw Object.assign(new Error("KCXDOC_FOUNDRY_MESSAGES_URL or KCXDOC_FOUNDRY_RESOURCE_NAME is required for Azure Foundry Claude."), { statusCode: 500 });
+  }
+  return process.env.KCXDOC_ANTHROPIC_MESSAGES_URL || ANTHROPIC_MESSAGES_URL;
 }
 
 async function authenticatedUserOrResponse(request) {
@@ -224,7 +259,7 @@ async function cosmosContainer() {
   return cosmosContainerPromise;
 }
 
-function generationReport({ status, generatedAt, metadata, model, usage, user, errorMessage = "" }) {
+function generationReport({ status, generatedAt, metadata, model, usage, user, provider = "anthropic", errorMessage = "" }) {
   const generatedBy = normalizedGeneratedBy(user);
   const report = {
     schemaVersion: 1,
@@ -232,7 +267,7 @@ function generationReport({ status, generatedAt, metadata, model, usage, user, e
     generatedAt,
     sessionId: String(metadata.sessionId || ""),
     title: String(metadata.title || (status === "failed" ? "Failed guide generation" : "")),
-    provider: "anthropic",
+    provider,
     model,
     promptVersion: String(metadata.promptVersion || ""),
     usage,
