@@ -2,20 +2,34 @@
 
 ## Model
 
-KCXDocumentor uses Anthropic Claude Sonnet 4.6 for the guide-draft implementation path.
+KCXDocumentor uses Claude Sonnet 4.6 for the guide-draft implementation path.
 
-Official Anthropic docs list the Claude API model ID as `claude-sonnet-4-6`. The current model overview positions Sonnet 4.6 as the best speed/intelligence balance, with text and image input, a 1M token context window, and Claude API pricing of $3/input MTok and $15/output MTok.
+The production provider path is Azure Foundry with the deployment name `claude-sonnet-4-6`. This keeps the Claude Messages API behavior while moving guide generation through the Azure Function proxy and the KCX Azure tenant.
 
-Local configuration points to the Azure Function proxy. The Anthropic key is configured on the Function App as `ANTHROPIC_API_KEY`, not in the local app:
+Local configuration points to the Azure Function proxy. The Foundry key is configured on the Function App, not in the local app:
 
 ```text
-KCXDOC_AI_PROVIDER=anthropic
+KCXDOC_AI_PROVIDER=azure-foundry
+KCXDOC_FOUNDRY_RESOURCE_NAME=foundry-kcxdocumentor-dev
+KCXDOC_FOUNDRY_MESSAGES_URL=https://foundry-kcxdocumentor-dev.services.ai.azure.com/anthropic/v1/messages
 KCXDOC_ANTHROPIC_MODEL=claude-sonnet-4-6
 KCXDOC_PROMPT_VERSION=guide-draft-v1
 KCXDOC_REMOTE_API_BASE_URL=https://kcxdocumentor-ai-dev.azurewebsites.net
 ```
 
-Do not commit `.env` or API keys.
+Do not commit `.env` or API keys. The local desktop app must never call Foundry or Anthropic directly.
+
+Current Foundry deployment sizing:
+
+- Resource: `foundry-kcxdocumentor-dev`
+- Resource group: `rg-kcxdocumentor-dev`
+- Region: `eastus2`
+- Deployment: `claude-sonnet-4-6`
+- SKU: `GlobalStandard`
+- Capacity: `80`
+- Effective limits: `80 RPM` and `80,000 TPM`
+
+Attempting capacity `100` failed because the current quota limit is `80` thousand TPM for Claude Sonnet 4.6. Any larger deployment requires a Microsoft/Azure quota increase.
 
 ## Prompt Contract
 

@@ -68,6 +68,7 @@ Current target architecture:
 - Keep the desktop app calling only the authenticated Azure Function for AI generation and AI Spend reporting.
 - Provision a Microsoft Foundry/Azure AI Services resource in `rg-kcxdocumentor-dev`.
 - Deploy `claude-sonnet-4-6` as a Global Standard deployment named `claude-sonnet-4-6`.
+- Size the deployment at capacity `80`, which currently yields `80 RPM` and `80,000 TPM` under the available Claude Sonnet 4.6 quota.
 - Configure the Function App with `KCXDOC_AI_PROVIDER=azure-foundry`, `KCXDOC_FOUNDRY_RESOURCE_NAME`, `KCXDOC_FOUNDRY_MESSAGES_URL`, `KCXDOC_FOUNDRY_API_KEY`, and `KCXDOC_ANTHROPIC_MODEL=claude-sonnet-4-6`.
 - Continue storing usage records in Cosmos DB so AI Spend reporting survives local session deletion.
 - Treat the Azure Function as the server-side policy boundary: it validates the signed-in user token, calls Foundry, records success/failure usage, and returns only the guide JSON/report to the local app.
@@ -78,6 +79,7 @@ Compliance notes:
 - Claude models in Foundry are currently preview/global-standard model deployments. Before allowing PHI-bearing production use, KCX should confirm internally that the selected Foundry model deployment, subscription type, region, and marketplace terms are acceptable under its compliance program.
 - Foundry Claude does not provide built-in content filtering at deployment time. KCXDocumentor should keep local prompt minimization, reviewer gates, QA checks, and PHI-aware operating rules in place.
 - For now, API-key authentication to Foundry is acceptable inside the Function App only. The longer-term preferred state is Entra-based Foundry authentication or managed identity if the Foundry deployment and SDK path support it cleanly for this Function.
+- A capacity increase above `80` currently requires a Microsoft/Azure quota request. The attempted capacity `100` update failed because quota was capped at `80` thousand TPM with `10` thousand TPM already in use at the time of the attempt.
 
 ## Document Quality Findings
 
