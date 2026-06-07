@@ -1183,7 +1183,8 @@ def test_estimate_generation_tokens_counts_trace_and_prompt(tmp_path: Path, monk
     (prompt_dir / "guide_draft_system.md").write_text("B" * 100, encoding="utf-8")
 
     monkeypatch.setattr(module, "WORKSPACE", workspace)
-    monkeypatch.setenv("KCXDOC_EXPECTED_OUTPUT_TOKENS", "5000")
+    monkeypatch.setenv("KCXDOC_MODEL_MAX_OUTPUT_TOKENS", "5000")
+    monkeypatch.setenv("KCXDOC_TOKEN_COUNT_SAFETY_MULTIPLIER", "1")
     monkeypatch.setenv("KCXDOC_FOUNDRY_TPM_LIMIT", "80000")
     monkeypatch.setenv("KCXDOC_FOUNDRY_TPM_TARGET", "70000")
 
@@ -1228,3 +1229,43 @@ def test_local_generation_job_runs_draft_docx_and_qa(tmp_path: Path, monkeypatch
     assert job["draft"]["draftSummary"]["title"] == "Guide"
     assert job["docx"]["docx"].endswith("user_guide.anthropic.docx")
     assert job["qa"]["passed"] is True
+
+
+def test_local_generation_job_stops_when_draft_generation_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    processed_root = tmp_path / "samples" / "processed"
+    session_dir = processed_root / "failed-draft-session"
+    session_dir.mkdir(parents=True)
+    (session_dir / "procedure_trace.json").write_text(json.dumps({"schemaVersion": 1, "sessionId": "failed-draft-session"}), encoding="utf-8")
+    build_called = False
+
+    def fail_draft(body: dict[str, Any], bearer_token: str = "") -> dict[str, Any]:
+        return {
+            "result": {"returnCode": 1, "stdout": "", "stderr": "remote proxy failed"},
+            "failureSummary": {"errorMessage": "Remote AI proxy request failed: HTTP 500"},
+        }
+
+    def build_docx(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal build_called
+        build_called = True
+        return {"result": {"returnCode": 0}}
+
+    monkeypatch.setattr(module, "PROCESSED_ROOT", processed_root)
+    monkeypatch.setattr(module, "estimate_generation_tokens", lambda _session_dir: {"estimatedTotalTokens": 1234})
+    monkeypatch.setattr(module, "generate_draft", fail_draft)
+    monkeypatch.setattr(module, "build_docx", build_docx)
+
+    result = module.start_local_generation_job({"sessionId": "failed-draft-session"}, bearer_token="token-123")
+    job_id = result["job"]["jobId"]
+    deadline = module.time.time() + 5
+    job = result["job"]
+    while module.time.time() < deadline:
+        job = module.read_local_generation_job(job_id)
+        if job["status"] == "failed":
+            break
+        module.time.sleep(0.05)
+
+    assert job["status"] == "failed"
+    assert "AI draft generation failed" in job["error"]
+    assert "Remote AI proxy request failed: HTTP 500" in job["error"]
+    assert build_called is False

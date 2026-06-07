@@ -112,12 +112,12 @@ See `docs/containerization.md` for runtime Whisper bootstrap behavior, offline/p
 The private GitHub Container Registry image is published as:
 
 ```text
-ghcr.io/damienjames53/kcxdocumentor:dev
+ghcr.io/keycentrix/kcxdocumentor:latest
 ```
 
 Authenticate before pulling the private image:
 
 ```bash
-echo <github-classic-pat-with-read-packages> | docker login ghcr.io -u damienjames53 --password-stdin
-docker pull ghcr.io/damienjames53/kcxdocumentor:dev
+echo <github-classic-pat-with-read-packages> | docker login ghcr.io -u <github-user> --password-stdin
+docker pull ghcr.io/keycentrix/kcxdocumentor:latest
 ```

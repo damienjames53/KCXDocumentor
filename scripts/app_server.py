@@ -622,7 +622,7 @@ def start_local_generation_job(body: dict[str, Any], bearer_token: str = "") -> 
         "sessionId": session_dir.name,
         "status": "queued",
         "phase": "queued",
-        "message": "Guide creation is queued on this workstation.",
+        "message": "Queued.",
         "createdAt": utc_timestamp(),
         "updatedAt": utc_timestamp(),
         "tokenEstimate": token_estimate,
@@ -652,32 +652,35 @@ def read_local_generation_job(job_id: str | None) -> dict[str, Any]:
 
 
 def run_local_generation_job(job_id: str, body: dict[str, Any], bearer_token: str) -> None:
-    update_local_generation_job(job_id, status="queued", phase="queued", message="Waiting for local guide-generation capacity.")
+    update_local_generation_job(job_id, status="queued", phase="queued", message="Queued.")
     with GENERATION_EXECUTION_LOCK:
         try:
-            update_local_generation_job(job_id, status="running", phase="draft", message="Queued with Azure AI capacity; generating the guide draft.")
+            update_local_generation_job(job_id, status="running", phase="draft", message="Generating section 1 of 1.")
             draft = generate_draft(body, bearer_token=bearer_token)
+            ensure_command_success(draft, "AI draft generation")
             update_local_generation_job(
                 job_id,
                 status="running",
                 phase="docx",
-                message="AI draft returned. Building the Word guide.",
+                message="Building DOCX.",
                 result={"draft": draft},
             )
             docx = build_docx(body, bearer_token=bearer_token)
+            ensure_command_success(docx, "DOCX build")
             update_local_generation_job(
                 job_id,
                 status="running",
                 phase="qa",
-                message="Word guide built. Running local QA checks.",
+                message="QA.",
                 result={"draft": draft, "docx": docx},
             )
             qa = qa_docx(body)
+            ensure_command_success(qa, "DOCX QA")
             update_local_generation_job(
                 job_id,
                 status="succeeded",
                 phase="complete",
-                message="Guide ready. DOCX built and local QA completed.",
+                message="Succeeded.",
                 completedAt=utc_timestamp(),
                 result={"draft": draft, "docx": docx, "qa": qa},
             )
@@ -686,10 +689,23 @@ def run_local_generation_job(job_id: str, body: dict[str, Any], bearer_token: st
                 job_id,
                 status="failed",
                 phase="failed",
-                message=f"Guide creation failed: {exc}",
+                message="Failed.",
                 error=str(exc),
                 completedAt=utc_timestamp(),
             )
+
+
+def ensure_command_success(payload: dict[str, Any], label: str) -> None:
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    if result and int(result.get("returnCode", 0) or 0) != 0:
+        failure_summary = payload.get("failureSummary") if isinstance(payload.get("failureSummary"), dict) else {}
+        message = (
+            failure_summary.get("errorMessage")
+            or result.get("stderr")
+            or result.get("stdout")
+            or f"{label} failed."
+        )
+        raise RuntimeError(f"{label} failed: {message}")
 
 
 def update_local_generation_job(job_id: str, **updates: Any) -> None:
@@ -730,12 +746,14 @@ def estimate_generation_tokens(session_dir: Path) -> dict[str, Any]:
     prompt_path = WORKSPACE / "prompts" / "guide_draft_system.md"
     trace_chars = len(trace_path.read_text(encoding="utf-8")) if trace_path.exists() else 0
     prompt_chars = len(prompt_path.read_text(encoding="utf-8")) if prompt_path.exists() else 0
-    estimated_input_tokens = math.ceil((trace_chars + prompt_chars) / 4)
-    expected_output_tokens = int(os.environ.get("KCXDOC_EXPECTED_OUTPUT_TOKENS", "12000") or 12000)
+    safety_multiplier = float(os.environ.get("KCXDOC_TOKEN_COUNT_SAFETY_MULTIPLIER", "1.15") or 1.15)
+    estimated_input_tokens = math.ceil(math.ceil((trace_chars + prompt_chars) / 4) * safety_multiplier)
+    expected_output_tokens = int(os.environ.get("KCXDOC_MODEL_MAX_OUTPUT_TOKENS", os.environ.get("KCXDOC_ANTHROPIC_MAX_TOKENS", "64000")) or 64000)
     tpm_limit = int(os.environ.get("KCXDOC_FOUNDRY_TPM_LIMIT", "80000") or 80000)
-    scheduling_target = int(os.environ.get("KCXDOC_FOUNDRY_TPM_TARGET", "70000") or 70000)
+    scheduling_target = int(os.environ.get("KCXDOC_FOUNDRY_TPM_TARGET", "68000") or 68000)
     return {
         "method": "chars_per_4",
+        "safetyMultiplier": safety_multiplier,
         "traceCharacters": trace_chars,
         "systemPromptCharacters": prompt_chars,
         "estimatedInputTokens": estimated_input_tokens,

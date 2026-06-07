@@ -80,10 +80,60 @@ Compliance notes:
 - Foundry Claude does not provide built-in content filtering at deployment time. KCXDocumentor should keep local prompt minimization, reviewer gates, QA checks, and PHI-aware operating rules in place.
 - For now, API-key authentication to Foundry is acceptable inside the Function App only. The longer-term preferred state is Entra-based Foundry authentication or managed identity if the Foundry deployment and SDK path support it cleanly for this Function.
 - A capacity increase above `80` currently requires a Microsoft/Azure quota request. The attempted capacity `100` update failed because quota was capped at `80` thousand TPM with `10` thousand TPM already in use at the time of the attempt.
+- Claude on Azure Foundry bills through Azure Marketplace separately from standard Azure credits and Azure consumption commitments.
+- Before switching the Function App to the company Azure subscription, confirm the target subscription has a payment method that explicitly covers Marketplace charges.
+- Standard Azure credits and some enterprise agreements do not cover Marketplace billing.
 
 ## Token-Aware Multi-User Generation Queue
 
 Multiple users can process recordings locally at the same time, but guide generation shares the Azure Foundry Claude deployment limit. The current deployment is `80 RPM / 80,000 TPM`, so the system should coordinate AI calls centrally instead of letting each workstation fire directly at the model.
+
+## Phase 1 Implementation Tasks
+
+### Generation Queue
+
+- Add Azure Storage Queue integration to the Function App for AI generation job scheduling.
+- Add Cosmos DB generation job records with `jobId`, `sessionId`, `title`, `owner`, `status`, `model`, `promptVersion`, `tokenEstimate`, `usage`, `failureReason`, `createdAt`, and `updatedAt`.
+- Implement queue-trigger Function worker that calls Azure Foundry, writes success/failure usage, and updates the job record.
+- Implement token estimate before queue submission using the Token Count API with a 15% safety multiplier.
+- Fall back to character-count approximation when the Token Count endpoint is unavailable.
+- Enforce `65,000-70,000` TPM scheduling target against the `80,000` TPM cap before admitting a job.
+- Enforce per-user concurrency limit of one active generation job at a time.
+- Implement `429` and timeout backoff in the queue worker as retryable failures.
+- Prevent aggressive browser retry for queued generation failures.
+- Keep `/api/generate-draft` available as a compatibility endpoint while the local app migrates to the queued route.
+- Add job status polling endpoint `/api/generation-jobs/{jobId}`.
+- Implement visible UI job states: `Queued`, `Generating section N of M`, `Waiting for AI capacity`, `Building DOCX`, `QA`, `Succeeded`, and `Failed`.
+- Set `max_tokens` to the model ceiling on all generation requests.
+- Do not constrain output length per generation request.
+- Check `stop_reason` after every generation.
+- Treat `stop_reason=max_tokens` as a generation failure.
+- Write `failureReason=output_token_limit_exceeded` to Cosmos DB when output hits the model token ceiling.
+
+### Docker And Distribution
+
+- Write `setup.bat` to check Docker Desktop installation.
+- Have `setup.bat` pull `ghcr.io/keycentrix/kcxdocumentor:latest`.
+- Have `setup.bat` create `%USERPROFILE%\KCXDocumentor\recordings`.
+- Have `setup.bat` create `%USERPROFILE%\KCXDocumentor\artifacts`.
+- Write `launch.bat` to check whether the named container is already running.
+- Have `launch.bat` start the container bound to `127.0.0.1:8765:8765`.
+- Have `launch.bat` mount `%USERPROFILE%\KCXDocumentor\recordings`.
+- Have `launch.bat` mount `%USERPROFILE%\KCXDocumentor\artifacts`.
+- Have `launch.bat` open the browser to `http://localhost:8765`.
+- Write `update.bat` to pull the latest image.
+- Write `stop.bat` to stop the named container.
+- Add GitHub Actions workflow to build and push `ghcr.io/keycentrix/kcxdocumentor:latest` on push to `main`.
+- Use `GITHUB_TOKEN` for GHCR publish.
+- Do not require a separate GHCR secret.
+- Document WSL2 as already enabled across workstations with IT and security approval.
+- Document Docker Desktop installation as unblocked.
+
+### Azure Marketplace Billing
+
+- Add Function App deployment runbook caveat for Claude on Azure Foundry billing through Azure Marketplace.
+- Document that Azure Marketplace billing is separate from standard Azure credits.
+- Confirm the target subscription payment method covers Marketplace charges before switching subscriptions.
 
 Implemented direction:
 
@@ -97,11 +147,59 @@ Implemented direction:
 
 Token controls:
 
-- Estimate request size before submission using a conservative character-count approximation until a provider token-count endpoint is available through the configured Foundry route.
-- Use `KCXDOC_FOUNDRY_TPM_LIMIT=80000` and a lower scheduling target such as `KCXDOC_FOUNDRY_TPM_TARGET=70000` so the queue leaves headroom for provider overhead and retries.
-- Run one active queued generation at a time until production telemetry shows the average prompt/output size safely supports more concurrency.
+- Estimate request size before submission with the Azure Foundry Anthropic-compatible Token Count API when available, applying `KCXDOC_TOKEN_COUNT_SAFETY_MULTIPLIER=1.15`.
+- Fall back to conservative character-count approximation when the Token Count API is unavailable.
+- Token Count API calls are free and are not billed as token consumption.
+- Apply a 15% safety multiplier to all token estimates before scheduling decisions.
+- Use `KCXDOC_FOUNDRY_TPM_LIMIT=80000` and a `65,000-70,000` TPM scheduling target such as `KCXDOC_FOUNDRY_TPM_TARGET=68000` so the queue leaves headroom for provider overhead and retries.
+- Run one active queued generation at a time per user until production telemetry shows the average prompt/output size safely supports more concurrency.
+- Use priority lane `normal` for standard immediate guide generation.
+- Reserve priority lane `batch` for future Phase 2 batch submissions.
+- Reserve priority lane `exception-approved` for future Phase 2 budget exception approvals.
 - Add segmentation later for traces whose estimated prompt plus expected output exceeds the scheduling target. Segment jobs should produce section-level guide JSON and merge into one final draft before DOCX build.
-- Treat HTTP `429` and timeout failures as retryable queue-worker failures with backoff; do not let the browser retry aggressively.
+- Treat HTTP `429` and timeout failures as retryable queue-worker failures with backoff.
+- Do not let the browser retry aggressively.
+- Surface visible UI job states: `Queued`, `Generating section N of M`, `Waiting for AI capacity`, `Building DOCX`, `QA`, `Succeeded`, and `Failed`.
+
+## Max Tokens Policy
+
+- Set `max_tokens` to the model ceiling on all generation requests.
+- Never artificially constrain output length per request.
+- Use the monthly budget cap and TPM queue as the real governance mechanisms.
+- Check `stop_reason` after every generation.
+- Treat `stop_reason=max_tokens` as a generation failure.
+- Record `failure_reason=output_token_limit_exceeded` in Cosmos DB when output hits the model token ceiling.
+
+## Monthly Budget Cap And Exception Mechanism - Phase 2
+
+- Store configurable monthly budget ceiling in Function App settings.
+- Run pre-flight Token Count API call before every generation request.
+- Estimate request cost before queue admission.
+- Return structured `budget_exceeded` response to the local app when request would exceed ceiling.
+- Include `current_spend`, `this_request_cost`, `projected_total`, `budget_cap`, and `overage` in the response.
+- Show UI modal with options: `Cancel`, `Request Exception`, and `Proceed with Approval`.
+- Add Cosmos DB exceptions collection.
+- Store `requestedBy`, `requestedAt`, `reason`, `requestedAmount`, `status`, `approvedBy`, and `approvedAt`.
+- Use exception status values: `pending`, `approved`, and `denied`.
+- Notify approver by email with approve/deny link.
+- Update Cosmos DB exception status from approve/deny action.
+- Notify requester when exception is approved or denied.
+- Allow user to retry the generation after approval.
+- Surface pending exception count on AI Spend dashboard.
+- Surface approved exception count on AI Spend dashboard.
+- Surface total approved exception amount alongside current month spend.
+
+## Batch Mode - Phase 2
+
+- Offer batch mode as optional 50% cost reduction on Azure Foundry for Claude Sonnet 4.6 when available.
+- Provide UI submission paths: `standard` for immediate generation and `batch` for up to 24-hour completion.
+- Submit batch jobs into the same generation queue.
+- Assign batch jobs lower priority than normal jobs.
+- Use email as the completion signal for batch jobs.
+- Assume local app session and Entra token may expire before batch completion.
+- Include direct link back to session artifacts in completion email.
+- Use same Cosmos DB generation job structure as standard generation jobs.
+- Add `mode=batch` to batch job records.
 
 Cost impact:
 
@@ -172,6 +270,9 @@ Current local app direction:
 - Prefer the KCXUIComponents primitive concepts: panels, buttons, status badges, app/top shell, form fields, and layout grids.
 - Keep per-session generation metadata visible with the selected session's artifacts, including model, generated timestamp, input/output/total tokens, and estimated cost.
 - Provide a separate AI Spend page for aggregate generated-document count and token cost by `day`, `week`, `month`, or `year`, plus a header-level current calendar month spend summary.
+- Surface cost per page alongside total cost and document count on the AI Spend page.
+- Treat cost per page as the primary cost communication metric for non-technical stakeholders.
+- Render sessions predating page tracking as `--` in pages and cost-per-page columns, not `0`.
 - Avoid one-off palettes, component forks, or custom CSS injection patterns.
 - If the product moves to a thick Windows client, keep the same information architecture and visual semantics where practical.
 - If the product moves to a full web client, consider adopting KCXUIComponents packages or copying the required token/style artifacts locally rather than depending on the reference repo path.
@@ -212,6 +313,25 @@ Source and artifact folders must remain host-mappable:
 This keeps large media, generated DOCX files, QA output, and local processing artifacts outside the image and available to the user on Windows and macOS. The Azure Function remains responsible for the Claude provider proxy and persisted AI Spend data.
 
 Compose must bind the app port as `127.0.0.1:8765:8765`. Binding to `0.0.0.0` would expose local recordings, screenshots, generated documents, and local processing controls to the workstation's network, which does not match the desktop-local trust model.
+
+## Docker Setup Scripts And Distribution
+
+- Distribute four batch scripts to team workstations: `setup.bat`, `launch.bat`, `update.bat`, and `stop.bat`.
+- Use `setup.bat` to check Docker Desktop installation.
+- Use `setup.bat` to pull the latest image.
+- Use `setup.bat` to create host-mounted folders.
+- Use `launch.bat` to check whether the container is already running.
+- Use `launch.bat` to start the container bound to `127.0.0.1:8765`.
+- Use `launch.bat` to open the browser automatically.
+- Use `update.bat` to pull the latest image.
+- Use `stop.bat` to stop the named container.
+- Treat WSL2 as already enabled across workstations with IT and security approval.
+- Treat Docker Desktop installation as unblocked for pilot users.
+- Do not require team members to know Docker commands to operate the tool.
+- Distribute image through GitHub Container Registry at `ghcr.io/keycentrix/kcxdocumentor:latest`.
+- Build image automatically through GitHub Actions on push to `main`.
+- Use `GITHUB_TOKEN` for GitHub Container Registry publish.
+- Keep image private under the Keycentrix GitHub organization.
 
 ## Compact Procedure Trace
 

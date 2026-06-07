@@ -86,7 +86,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=int(os.environ.get("KCXDOC_ANTHROPIC_MAX_TOKENS", "16000")),
+        default=int(os.environ.get("KCXDOC_ANTHROPIC_MAX_TOKENS", os.environ.get("KCXDOC_MODEL_MAX_OUTPUT_TOKENS", "64000"))),
         help="Maximum output tokens for Anthropic generation.",
     )
     parser.add_argument("--temperature", type=float, default=0.2, help="Generation temperature for Anthropic generation.")

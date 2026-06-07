@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ghcr.io/damienjames53/kcxdocumentor:dev
+    image: ghcr.io/keycentrix/kcxdocumentor:latest
     container_name: kcxdocumentor-dev
     env_file:
       - .env

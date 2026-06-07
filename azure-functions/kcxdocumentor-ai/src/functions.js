@@ -10,6 +10,8 @@ const INPUT_COST_PER_MILLION = 3.0;
 const OUTPUT_COST_PER_MILLION = 15.0;
 const ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages";
 const FOUNDRY_MESSAGES_PATH = "/anthropic/v1/messages";
+const ACTIVE_JOB_STATUSES = ["queued", "waiting_capacity", "generating"];
+const OUTPUT_TOKEN_LIMIT_EXCEEDED = "output_token_limit_exceeded";
 
 let cosmosContainerPromise;
 let queueClientPromise;
@@ -37,7 +39,8 @@ app.http("generateDraft", {
     let result = {};
 
     try {
-      result = await callClaude({ ...anthropicPayload, model });
+      result = await callClaude(prepareGenerationPayload({ ...anthropicPayload, model }));
+      ensureGenerationCompleted(result);
       const report = generationReport({
         status: "succeeded",
         generatedAt,
@@ -87,15 +90,29 @@ app.http("generationJobs", {
     const metadata = body?.metadata && typeof body.metadata === "object" ? body.metadata : {};
     const model = String(anthropicPayload.model || metadata.model || DEFAULT_MODEL);
     const now = utcTimestamp();
-    const tokenEstimate = estimatePayloadTokens(anthropicPayload);
+    const activeJob = await readActiveGenerationJobForUser(user);
+    if (activeJob) {
+      return jsonResponse({
+        error: "The signed-in user already has an active generation job.",
+        activeJob: publicGenerationJob(activeJob),
+      }, 409);
+    }
+    const generationPayload = prepareGenerationPayload({ ...anthropicPayload, model });
+    const tokenEstimate = await estimatePayloadTokens(generationPayload);
+    if (tokenEstimate.estimatedTotalTokens > tokenEstimate.schedulingTargetTokens) {
+      return jsonResponse({
+        error: "Generation job exceeds the current AI scheduling target. Segment the recording before creating the guide.",
+        tokenEstimate,
+      }, 413);
+    }
     const job = generationJob({
       status: "queued",
-      message: "Queued for AI capacity.",
+      message: "Queued.",
       user,
       metadata,
       model,
       tokenEstimate,
-      anthropicPayload: { ...anthropicPayload, model },
+      anthropicPayload: generationPayload,
       createdAt: now,
       updatedAt: now,
     });
@@ -138,6 +155,7 @@ app.storageQueue("processGenerationJob", {
   handler: async (message, context) => {
     const pointer = typeof message === "string" ? safeJsonParse(message) : message;
     const jobId = pointer?.jobId;
+    const attempt = Number(pointer?.attempt || context?.triggerMetadata?.dequeueCount || 1);
     if (!jobId) {
       context.error("Generation queue message did not include a jobId.");
       return;
@@ -155,7 +173,7 @@ app.storageQueue("processGenerationJob", {
     const generatedAt = utcTimestamp();
     job = await patchGenerationJob(job, {
       status: "generating",
-      message: "AI guide generation is running.",
+      message: "Generating section 1 of 1.",
       startedAt: job.startedAt || generatedAt,
       updatedAt: generatedAt,
     });
@@ -163,6 +181,7 @@ app.storageQueue("processGenerationJob", {
     try {
       const model = String(job.model || DEFAULT_MODEL);
       const result = await callClaude(job.anthropicPayload || {});
+      ensureGenerationCompleted(result);
       const report = generationReport({
         status: "succeeded",
         generatedAt,
@@ -183,7 +202,22 @@ app.storageQueue("processGenerationJob", {
         usage: report.usage,
       });
     } catch (error) {
+      if (isRetryableClaudeError(error) && attempt < maxQueueRetryCount()) {
+        const retryDelaySeconds = queueRetryDelaySeconds(attempt);
+        await patchGenerationJob(job, {
+          status: "waiting_capacity",
+          message: "Waiting for AI capacity.",
+          failureReason: failureReasonForError(error),
+          errorMessage: error.message || "AI generation is waiting for capacity.",
+          retryAfterSeconds: retryDelaySeconds,
+          retryAttempt: attempt + 1,
+          updatedAt: utcTimestamp(),
+        });
+        await requeueGenerationJob(job, attempt + 1, retryDelaySeconds);
+        return;
+      }
       const model = String(job.model || DEFAULT_MODEL);
+      const failureReason = failureReasonForError(error);
       const report = generationReport({
         status: "failed",
         generatedAt,
@@ -193,6 +227,7 @@ app.storageQueue("processGenerationJob", {
         provider: aiProviderName(),
         user: job.generatedBy || job.user || {},
         errorMessage: error.message || "AI generation job failed.",
+        failureReason,
       });
       await upsertUsageRecord(report);
       await patchGenerationJob(job, {
@@ -201,6 +236,7 @@ app.storageQueue("processGenerationJob", {
         completedAt: utcTimestamp(),
         updatedAt: utcTimestamp(),
         errorMessage: report.errorMessage,
+        failureReason,
         generationReport: report,
         usage: report.usage,
       });
@@ -265,6 +301,7 @@ async function callClaude(payload) {
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(providerTimeoutMs()),
   });
   const text = await response.text();
   const data = text ? safeJsonParse(text) : {};
@@ -277,6 +314,57 @@ async function callClaude(payload) {
     throw error;
   }
   return data;
+}
+
+async function countClaudeTokens(payload) {
+  const provider = aiProviderName();
+  const apiKey = apiKeyForProvider(provider);
+  if (!apiKey || apiKey === "__SET_ME__") {
+    throw Object.assign(new Error(`${apiKeySettingName(provider)} is not configured on the Function App.`), { statusCode: 500 });
+  }
+  const countPayload = tokenCountPayload(payload);
+  const response = await fetch(tokenCountUrlForProvider(provider), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify(countPayload),
+    signal: AbortSignal.timeout(providerTimeoutMs()),
+  });
+  const text = await response.text();
+  const data = text ? safeJsonParse(text) : {};
+  if (!response.ok) {
+    const message = data?.error?.message || data?.message || text || `HTTP ${response.status}`;
+    throw Object.assign(new Error(`Claude Token Count API failed through ${provider}: HTTP ${response.status}: ${message}`), { statusCode: response.status });
+  }
+  return Number(data.input_tokens ?? data.inputTokens ?? 0) || 0;
+}
+
+function tokenCountPayload(payload) {
+  const allowed = {};
+  for (const key of ["model", "system", "messages", "tools", "tool_choice", "thinking"]) {
+    if (payload[key] !== undefined) allowed[key] = payload[key];
+  }
+  return allowed;
+}
+
+function prepareGenerationPayload(payload) {
+  return {
+    ...payload,
+    max_tokens: modelOutputTokenCeiling(payload?.model),
+  };
+}
+
+function ensureGenerationCompleted(result) {
+  if (String(result?.stop_reason || "") === "max_tokens") {
+    const error = new Error("AI generation stopped because the model output token ceiling was reached.");
+    error.statusCode = 422;
+    error.failureReason = OUTPUT_TOKEN_LIMIT_EXCEEDED;
+    error.anthropicResult = result;
+    throw error;
+  }
 }
 
 function aiProviderName() {
@@ -308,6 +396,12 @@ function messagesUrlForProvider(provider) {
     throw Object.assign(new Error("KCXDOC_FOUNDRY_MESSAGES_URL or KCXDOC_FOUNDRY_RESOURCE_NAME is required for Azure Foundry Claude."), { statusCode: 500 });
   }
   return process.env.KCXDOC_ANTHROPIC_MESSAGES_URL || ANTHROPIC_MESSAGES_URL;
+}
+
+function tokenCountUrlForProvider(provider) {
+  const explicitUrl = process.env.KCXDOC_TOKEN_COUNT_URL || process.env.ANTHROPIC_TOKEN_COUNT_URL;
+  if (explicitUrl) return explicitUrl;
+  return `${messagesUrlForProvider(provider).replace(/\/messages$/, "/messages/count_tokens")}`;
 }
 
 async function authenticatedUserOrResponse(request) {
@@ -399,6 +493,34 @@ async function readGenerationJob(jobId) {
   return resources[0] || null;
 }
 
+async function readActiveGenerationJobForUser(user) {
+  const generatedBy = normalizedGeneratedBy(user);
+  const container = await cosmosContainer();
+  const ownerOid = generatedBy.oid || "";
+  const ownerUsername = generatedBy.username || "";
+  if (!ownerOid && !ownerUsername) return null;
+  const { resources } = await container.items
+    .query({
+      query: `
+        SELECT TOP 1 * FROM c
+        WHERE c.documentType = 'generationJob'
+          AND ARRAY_CONTAINS(@statuses, c.status)
+          AND (
+            (@ownerOid != '' AND c.generatedBy.oid = @ownerOid)
+            OR (@ownerUsername != '' AND LOWER(c.generatedBy.username) = LOWER(@ownerUsername))
+          )
+        ORDER BY c.createdAt DESC
+      `,
+      parameters: [
+        { name: "@statuses", value: ACTIVE_JOB_STATUSES },
+        { name: "@ownerOid", value: ownerOid },
+        { name: "@ownerUsername", value: ownerUsername },
+      ],
+    })
+    .fetchAll();
+  return resources[0] || null;
+}
+
 async function patchGenerationJob(job, updates) {
   const updated = {
     ...job,
@@ -425,6 +547,17 @@ async function generationQueueClient() {
     })();
   }
   return queueClientPromise;
+}
+
+async function requeueGenerationJob(job, attempt, visibilityTimeout) {
+  const queue = await generationQueueClient();
+  await queue.sendMessage(JSON.stringify({
+    jobId: job.jobId,
+    partitionKey: job.partitionKey,
+    attempt,
+  }), {
+    visibilityTimeout,
+  });
 }
 
 async function readUsageRecords() {
@@ -464,6 +597,7 @@ function generationJob({ status, message, user, metadata, model, tokenEstimate, 
     partitionKey,
     status,
     message,
+    failureReason: "",
     createdAt,
     updatedAt,
     sessionId,
@@ -473,6 +607,7 @@ function generationJob({ status, message, user, metadata, model, tokenEstimate, 
     promptVersion: String(metadata.promptVersion || ""),
     metadata,
     tokenEstimate,
+    owner: generatedBy,
     generatedBy,
     user: generatedBy,
     anthropicPayload,
@@ -496,6 +631,7 @@ function publicGenerationJob(job) {
     tokenEstimate: job.tokenEstimate || {},
     usage: job.usage || job.generationReport?.usage || {},
     errorMessage: job.errorMessage || "",
+    failureReason: job.failureReason || "",
     generationReport: job.generationReport || null,
   };
   if (job.status === "succeeded") {
@@ -514,22 +650,90 @@ function canReadJob(job, user) {
   );
 }
 
-function estimatePayloadTokens(payload) {
+async function estimatePayloadTokens(payload) {
+  const safetyMultiplier = tokenSafetyMultiplier();
+  try {
+    const inputTokens = await countClaudeTokens(payload);
+    return buildTokenEstimate({
+      method: "token_count_api",
+      rawInputTokens: inputTokens,
+      inputTokens,
+      characterCount: JSON.stringify(payload || {}).length,
+      safetyMultiplier,
+      maxTokens: payload?.max_tokens,
+    });
+  } catch (error) {
+    return fallbackPayloadTokenEstimate(payload, error, safetyMultiplier);
+  }
+}
+
+function fallbackPayloadTokenEstimate(payload, error, safetyMultiplier = tokenSafetyMultiplier()) {
   const serialized = JSON.stringify(payload || {});
-  const estimatedInputTokens = Math.ceil(serialized.length / 4);
-  const expectedOutputTokens = Number(payload?.max_tokens || process.env.KCXDOC_EXPECTED_OUTPUT_TOKENS || 12000) || 12000;
-  return {
+  const inputTokens = Math.ceil(serialized.length / 4);
+  return buildTokenEstimate({
     method: "chars_per_4",
+    rawInputTokens: inputTokens,
+    inputTokens,
+    characterCount: serialized.length,
+    safetyMultiplier,
+    maxTokens: payload?.max_tokens,
+    fallbackReason: error?.message || "Token Count API unavailable.",
+  });
+}
+
+function buildTokenEstimate({ method, rawInputTokens, inputTokens, characterCount, safetyMultiplier, maxTokens, fallbackReason = "" }) {
+  const estimatedInputTokens = Math.ceil(Number(inputTokens || 0) * safetyMultiplier);
+  const expectedOutputTokens = Number(maxTokens || modelOutputTokenCeiling()) || modelOutputTokenCeiling();
+  return {
+    method,
+    safetyMultiplier,
+    rawInputTokens: Number(rawInputTokens || 0),
     estimatedInputTokens,
     expectedOutputTokens,
     estimatedTotalTokens: estimatedInputTokens + expectedOutputTokens,
-    characterCount: serialized.length,
+    characterCount: Number(characterCount || 0),
     tpmLimit: Number(process.env.KCXDOC_FOUNDRY_TPM_LIMIT || 80000) || 80000,
-    schedulingTargetTokens: Number(process.env.KCXDOC_FOUNDRY_TPM_TARGET || 70000) || 70000,
+    schedulingTargetTokens: Number(process.env.KCXDOC_FOUNDRY_TPM_TARGET || 68000) || 68000,
+    fallbackReason,
   };
 }
 
-function generationReport({ status, generatedAt, metadata, model, usage, user, provider = "anthropic", errorMessage = "" }) {
+function tokenSafetyMultiplier() {
+  return Number(process.env.KCXDOC_TOKEN_COUNT_SAFETY_MULTIPLIER || 1.15) || 1.15;
+}
+
+function modelOutputTokenCeiling() {
+  return Number(process.env.KCXDOC_MODEL_MAX_OUTPUT_TOKENS || process.env.KCXDOC_ANTHROPIC_MAX_TOKENS || 64000) || 64000;
+}
+
+function isRetryableClaudeError(error) {
+  const status = Number(error?.statusCode || 0);
+  return status === 429 || status === 408 || status === 504 || error?.name === "TimeoutError";
+}
+
+function maxQueueRetryCount() {
+  return Number(process.env.KCXDOC_GENERATION_QUEUE_MAX_RETRIES || 5) || 5;
+}
+
+function queueRetryDelaySeconds(attempt) {
+  const base = Number(process.env.KCXDOC_GENERATION_RETRY_BASE_SECONDS || 30) || 30;
+  const max = Number(process.env.KCXDOC_GENERATION_RETRY_MAX_SECONDS || 300) || 300;
+  return Math.min(max, base * (2 ** Math.max(0, Number(attempt || 1) - 1)));
+}
+
+function providerTimeoutMs() {
+  return Number(process.env.KCXDOC_PROVIDER_TIMEOUT_MS || 240000) || 240000;
+}
+
+function failureReasonForError(error) {
+  if (error?.failureReason) return String(error.failureReason);
+  const status = Number(error?.statusCode || 0);
+  if (status === 429) return "rate_limited";
+  if (status === 408 || status === 504 || error?.name === "TimeoutError") return "timeout";
+  return "ai_generation_failed";
+}
+
+function generationReport({ status, generatedAt, metadata, model, usage, user, provider = "anthropic", errorMessage = "", failureReason = "" }) {
   const generatedBy = normalizedGeneratedBy(user);
   const report = {
     schemaVersion: 1,
@@ -542,6 +746,7 @@ function generationReport({ status, generatedAt, metadata, model, usage, user, p
     promptVersion: String(metadata.promptVersion || ""),
     usage,
     errorMessage,
+    failureReason,
     generatedBy,
     user: generatedBy,
   };

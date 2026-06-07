@@ -82,14 +82,14 @@ Do not put an Anthropic API key in the local `.env` file. The key belongs on the
 The Docker image is published as a private GitHub Container Registry package:
 
 ```text
-ghcr.io/damienjames53/kcxdocumentor:dev
+ghcr.io/keycentrix/kcxdocumentor:latest
 ```
 
 Create or obtain a GitHub classic personal access token with `read:packages`. Then sign in from PowerShell:
 
 ```powershell
 $env:CR_PAT = "<github-classic-pat-with-read-packages>"
-echo $env:CR_PAT | docker login ghcr.io -u damienjames53 --password-stdin
+echo $env:CR_PAT | docker login ghcr.io -u <github-user> --password-stdin
 Remove-Item Env:\CR_PAT
 ```
 
@@ -97,11 +97,11 @@ Do not paste the token into screenshots, Teams chats, tickets, or shared documen
 
 ## Start KCXDocumentor
 
-From the folder that contains `docker-compose.yml`, pull and start the application:
+From the folder that contains the KCXDocumentor setup scripts, run:
 
 ```powershell
-docker compose pull
-docker compose up -d
+setup.bat
+launch.bat
 ```
 
 The first start can take several minutes because the container may download and build `whisper.cpp`, then download the configured model into `C:\KCXDocumentor\external\whisper`.
@@ -109,7 +109,7 @@ The first start can take several minutes because the container may download and 
 Watch startup progress:
 
 ```powershell
-docker compose logs -f kcxdocumentor
+docker logs -f kcxdocumentor
 ```
 
 When startup is complete, open:

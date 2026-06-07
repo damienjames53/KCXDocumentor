@@ -73,7 +73,7 @@ def add_cover(doc: Document) -> None:
     rows = [
         ("Document type", "Windows setup and first-run guide"),
         ("Application", "KCXDocumentor"),
-        ("Container image", "ghcr.io/damienjames53/kcxdocumentor:dev"),
+        ("Container image", "ghcr.io/keycentrix/kcxdocumentor:latest"),
         ("Local URL", "http://127.0.0.1:8765"),
         ("Revision date", date.today().isoformat()),
     ]

@@ -3,7 +3,7 @@
 KCXDocumentor publishes its Docker image to GitHub Container Registry as a private package:
 
 ```text
-ghcr.io/damienjames53/kcxdocumentor:dev
+ghcr.io/keycentrix/kcxdocumentor:latest
 ```
 
 The publishing workflow is:
@@ -23,8 +23,8 @@ GitHub Container Registry requires authentication for private packages.
 For local pulls, use a classic GitHub personal access token with `read:packages`:
 
 ```bash
-echo <github-classic-pat-with-read-packages> | docker login ghcr.io -u damienjames53 --password-stdin
-docker pull ghcr.io/damienjames53/kcxdocumentor:dev
+echo <github-classic-pat-with-read-packages> | docker login ghcr.io -u <github-user> --password-stdin
+docker pull ghcr.io/keycentrix/kcxdocumentor:latest
 ```
 
 Then run:
@@ -32,6 +32,8 @@ Then run:
 ```bash
 docker compose up -d
 ```
+
+The publish workflow uses `GITHUB_TOKEN` with `packages: write`; no separate GHCR secret is required.
 
 ## Build Behavior
 

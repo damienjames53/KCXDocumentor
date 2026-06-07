@@ -53,7 +53,7 @@
 
         <ol class="workflow-steps" aria-label="Guide creation workflow">
           <li><span class="workflow-number" aria-hidden="true">1</span><div><strong>Import</strong><small>Select the recording and optional transcript.</small></div></li>
-          <li><span class="workflow-number" aria-hidden="true">2</span><div><strong>Process Recording</strong><small>Create the local trace and frame candidates.</small></div></li>
+          <li><span class="workflow-number" aria-hidden="true">2</span><div><strong>Process Recording</strong><small>Create the session summary and frame candidates.</small></div></li>
           <li><span class="workflow-number" aria-hidden="true">3</span><div><strong>Review Frames</strong><small>Approve, reject, or add screenshots.</small></div></li>
           <li><span class="workflow-number" aria-hidden="true">4</span><div><strong>Create Guide</strong><small>Generate guide content and prepare the DOCX.</small></div></li>
           <li><span class="workflow-number" aria-hidden="true">5</span><div><strong>Download DOCX</strong><small>Use QA status as a secondary readiness check.</small></div></li>
@@ -189,14 +189,14 @@
         </div>
 
         <div class="tabs" role="tablist" aria-label="Session views">
-          <button class="tab active" type="button" data-tab="trace">Segments</button>
+          <button class="tab active" type="button" data-tab="trace">Session Summary</button>
           <button class="tab" type="button" data-tab="frames">Frames</button>
           <button class="tab" type="button" data-tab="artifacts">Artifacts</button>
           <button class="tab" type="button" data-tab="json">JSON</button>
         </div>
 
         <div id="traceTab" class="tab-panel active">
-          <div id="segmentList" class="segment-list empty-state">Select or process a session to inspect trace segments.</div>
+          <div id="segmentList" class="segment-list empty-state">Select or process a session to inspect the session summary.</div>
         </div>
 
         <div id="framesTab" class="tab-panel">

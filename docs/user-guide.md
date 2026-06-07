@@ -39,7 +39,7 @@ Optional transcript files, such as Teams `.vtt` exports, should also be placed i
 The workflow has five parts:
 
 - Import the source recording and optional transcript.
-- Process the recording into a local trace and candidate screenshots.
+- Process the recording into a local session summary and candidate screenshots.
 - Review frames before AI guide creation.
 - Create the guide, which builds the DOCX and runs local QA.
 - Download and review the customer-facing draft.
@@ -105,7 +105,7 @@ Common examples:
 - The model returned incomplete JSON.
 - The response exceeded the available output budget.
 - The API request failed.
-- The source trace is missing or invalid.
+- The source session summary is missing or invalid.
 
 When a failed AI attempt includes usage data, it is stored in the Cosmos-backed AI Spend history.
 

@@ -61,7 +61,7 @@ The console is organized around the shortest safe path to a reviewable guide:
 
 1. Import or select a recording.
 2. Import or select a transcript when one exists. Teams sidecar transcripts should be preferred; leaving the transcript blank falls back to local Whisper during processing.
-3. Choose **Process Recording** to create a trace and candidate screenshots.
+3. Choose **Process Recording** to create a session summary and candidate screenshots.
 4. Review frames before guide generation. Approved frames are preferred, rejected frames are excluded from screenshot candidates, and rejected-frame notes are preserved as reviewer guidance.
 5. Choose **Create Guide** to generate guide content and prepare the DOCX.
 6. Choose **Download DOCX** or use the DOCX download link in the Artifacts tab. Use **Re-run QA** as a secondary status check after guide or screenshot changes.

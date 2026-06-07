@@ -58,3 +58,8 @@ The workflow:
 6. Deploys the Function App using `Azure/functions-action@v1`.
 
 This avoids remote Kudu builds and keeps deployment scoped to the Function source folder.
+
+## Azure Marketplace Billing
+
+- Claude on Azure Foundry bills through Azure Marketplace separately from standard Azure credits.
+- Confirm the target subscription payment method covers Marketplace charges before switching subscriptions.

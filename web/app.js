@@ -1492,7 +1492,7 @@ function renderTrace() {
   const segments = getSegments();
   if (segments.length === 0) {
     els.segmentList.className = "segment-list empty-state";
-    els.segmentList.textContent = "Select or process a session to inspect trace segments.";
+    els.segmentList.textContent = "Select or process a session to inspect the session summary.";
     return;
   }
 
@@ -2346,9 +2346,9 @@ function buildReadinessChecks(trace, segments) {
 
   const checks = [
     {
-      label: "Trace loaded",
+      label: "Session summary loaded",
       state: trace.schemaVersion === 1 ? "good" : "bad",
-      detail: trace.schemaVersion === 1 ? "Procedure trace schema version 1." : "Trace is missing or unsupported.",
+      detail: trace.schemaVersion === 1 ? "Session summary is ready for review." : "Session summary is missing or unsupported.",
     },
     {
       label: "Transcript quality",
@@ -2790,7 +2790,7 @@ function updateActionAvailability() {
   els.addFrameTimestampButton.disabled = state.busy || !hasLoadedSession;
   els.useVideoTimeButton.disabled = state.busy || !hasLoadedSession;
 
-  els.processButton.title = hasRecording ? "Process the selected recording into a local trace." : "Select a recording first.";
+  els.processButton.title = hasRecording ? "Process the selected recording into a local session summary." : "Select a recording first.";
   els.generateDraftButton.title = !cloudReady
     ? "Sign in with Microsoft to create an AI guide."
     : hasSession ? "Create the AI guide, build the DOCX, and run local QA." : "Select or process a session first.";

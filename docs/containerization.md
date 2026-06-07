@@ -82,7 +82,7 @@ docker compose up -d
 Or pull the private GitHub Container Registry image after authenticating to GHCR:
 
 ```bash
-echo <github-classic-pat-with-read-packages> | docker login ghcr.io -u damienjames53 --password-stdin
+echo <github-classic-pat-with-read-packages> | docker login ghcr.io -u <github-user> --password-stdin
 docker compose pull
 docker compose up -d
 ```
@@ -90,8 +90,21 @@ docker compose up -d
 The image name is:
 
 ```text
-ghcr.io/damienjames53/kcxdocumentor:dev
+ghcr.io/keycentrix/kcxdocumentor:latest
 ```
+
+For Windows pilot workstations, use the included scripts:
+
+```bat
+setup.bat
+launch.bat
+update.bat
+stop.bat
+```
+
+`setup.bat` creates `%USERPROFILE%\KCXDocumentor\recordings` and `%USERPROFILE%\KCXDocumentor\artifacts`. `launch.bat` binds the app to `127.0.0.1:8765`, mounts those host folders into the container, and opens the browser automatically.
+
+WSL2 is expected to be enabled across pilot workstations with IT and security approval. Docker Desktop installation is unblocked for the target users.
 
 Watch first-start bootstrap logs:
 
