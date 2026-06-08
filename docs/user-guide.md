@@ -29,10 +29,10 @@ The Workspace opens with the preparation workflow on the left, session review in
 Use recordings from:
 
 ```text
-samples/raw/
+%USERPROFILE%\KCXDocumentor\recordings
 ```
 
-Optional transcript files, such as Teams `.vtt` exports, should also be placed in `samples/raw/`.
+Optional transcript files, such as Teams `.vtt` exports, should also be imported through the UI or placed in the same `recordings` folder.
 
 ## Workflow Overview
 
@@ -148,14 +148,14 @@ Use **Delete Session** when a processed session is stale or tied to deleted loca
 Deleting a session removes:
 
 ```text
-samples/processed/<sessionId>
-artifacts/generated/<sessionId>
+%USERPROFILE%\KCXDocumentor\artifacts\processed\<sessionId>
+%USERPROFILE%\KCXDocumentor\artifacts\generated\<sessionId>
 ```
 
 Deleting a session does not remove:
 
 ```text
-samples/raw/
+%USERPROFILE%\KCXDocumentor\recordings
 ```
 
 It also does not remove Cosmos-backed AI Spend history.

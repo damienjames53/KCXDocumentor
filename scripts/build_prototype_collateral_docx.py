@@ -334,7 +334,7 @@ def _doc_specs() -> list[DocSpec]:
                     "Groups screenshots as Recommended, Alternates, and Needs Attention before guide creation.",
                     "Lets reviewers approve, reject, or capture screenshots from the video picker.",
                     "Runs OCR and evidence scoring on reviewer-added frames so they carry segment context into guide generation.",
-                    "Creates a DOCX guide through an authenticated Azure Function proxy to Anthropic.",
+                    "Creates a DOCX guide through an authenticated Azure Function proxy to Azure Foundry Claude.",
                     "Persists AI Spend in Cosmos DB by user, document, token count, page count, and estimated cost.",
                 ]),
                 ("Architecture Summary", [
@@ -423,8 +423,8 @@ def _doc_specs() -> list[DocSpec]:
                 ]),
                 ("Folder Layout", [
                     ["Folder", "Purpose"],
-                    ["C:\\KCXDocumentor\\samples\\raw", "Imported source videos and optional transcript files."],
-                    ["C:\\KCXDocumentor\\samples\\processed", "Local processing sessions."],
+                    ["C:\\KCXDocumentor\\recordings", "Imported source videos and optional transcript files."],
+                    ["C:\\KCXDocumentor\\artifacts\\processed", "Local processing sessions."],
                     ["C:\\KCXDocumentor\\artifacts", "Generated DOCX files and QA artifacts."],
                     ["C:\\KCXDocumentor\\external\\whisper", "Runtime Whisper binaries and models."],
                 ]),
@@ -450,7 +450,7 @@ def _doc_specs() -> list[DocSpec]:
                     ["Docker cannot connect", "Confirm Docker Desktop is running and fully started."],
                     ["The app does not open", "Confirm docker compose ps shows port 8765."],
                     ["Sign-in fails", "Confirm the app registration allows http://127.0.0.1:8765/ and the user is assigned."],
-                    ["No recordings appear", "Confirm the source video was imported or placed in the mapped raw folder."],
+                    ["No recordings appear", "Confirm the source video was imported or placed in the mapped recordings folder."],
                     ["Whisper is unavailable", "Check container logs and confirm the Whisper folder is writable."],
                     ["Guide creation fails", "Review Latest Activity and confirm the Azure Function API is reachable."],
                 ]),

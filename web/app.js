@@ -618,6 +618,11 @@ async function processRecording(event) {
     const sessionId = result.sessionId || result.session?.sessionId || payload.sessionId;
     setOperation("Processing complete. Review frames, then choose Create Guide.");
     logActivity(`Processing complete${sessionId ? ` for ${sessionId}` : ""}. Review frames before creating the guide.`);
+    if (result.generatedTranscript) {
+      upsertTranscript(result.generatedTranscript);
+      renderTranscripts();
+      logActivity(`Saved Whisper transcript sidecar ${getTranscriptLabel(result.generatedTranscript)}.`);
+    }
     await refreshSessions();
     if (sessionId) {
       selectSession(sessionId, { load: true });
@@ -928,8 +933,9 @@ function selectSession(sessionId, options = {}) {
   renderSelectedSessionPill();
   updateActionAvailability();
   if (options.load && sessionId) {
-    loadSession(sessionId);
+    return loadSession(sessionId);
   }
+  return Promise.resolve();
 }
 
 function requireSessionId() {
@@ -1318,7 +1324,7 @@ function renderRecordings() {
   els.recordingSelect.innerHTML = "";
   if (state.recordings.length === 0) {
     els.recordingSelect.append(new Option("No recordings found", ""));
-    els.recordingList.innerHTML = `<li class="muted">Place video files in samples/raw and refresh.</li>`;
+    els.recordingList.innerHTML = `<li class="muted">Import a recording or place video files in your KCXDocumentor recordings folder, then refresh.</li>`;
     els.recordingCount.textContent = "0";
     return;
   }
@@ -1333,11 +1339,21 @@ function renderRecordings() {
   els.recordingList.innerHTML = "";
   state.recordings.forEach((recording) => {
     const item = document.createElement("li");
+    const value = getRecordingValue(recording);
     item.textContent = getRecordingLabel(recording);
-    item.title = getRecordingValue(recording);
+    item.title = value;
+    item.className = value === els.recordingSelect.value ? "selected" : "";
+    item.tabIndex = 0;
+    item.setAttribute("role", "button");
+    item.setAttribute("aria-label", `Show sessions for ${getRecordingLabel(recording)}`);
     item.addEventListener("click", () => {
-      els.recordingSelect.value = getRecordingValue(recording);
-      syncSessionIdPlaceholder();
+      selectRecording(value, { loadMatchingSession: true });
+    });
+    item.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectRecording(value, { loadMatchingSession: true });
+      }
     });
     els.recordingList.append(item);
   });
@@ -1346,9 +1362,10 @@ function renderRecordings() {
 
 function renderTranscripts() {
   const selected = els.transcriptSelect.value;
+  const transcripts = filteredTranscriptsForSelectedRecording();
   els.transcriptSelect.innerHTML = "";
   els.transcriptSelect.append(new Option("No transcript selected", ""));
-  state.transcripts.forEach((transcript) => {
+  transcripts.forEach((transcript) => {
     const label = getTranscriptLabel(transcript);
     const value = getTranscriptValue(transcript);
     els.transcriptSelect.append(new Option(label, value));
@@ -1356,6 +1373,22 @@ function renderTranscripts() {
   if (selected && Array.from(els.transcriptSelect.options).some((option) => option.value === selected)) {
     els.transcriptSelect.value = selected;
   }
+}
+
+function filteredTranscriptsForSelectedRecording() {
+  const selectedRecording = els.recordingSelect.value;
+  if (!selectedRecording) return state.transcripts;
+  const recordingStem = normalizeMediaStem(basename(selectedRecording));
+  return state.transcripts.filter((transcript) => {
+    const value = getTranscriptValue(transcript);
+    const label = getTranscriptLabel(transcript);
+    const transcriptStem = normalizeMediaStem(basename(value || label));
+    return transcriptStem === recordingStem
+      || transcriptStem.startsWith(`${recordingStem}-`)
+      || transcriptStem.startsWith(`${recordingStem}.`)
+      || transcriptStem.includes(recordingStem)
+      || recordingStem.includes(transcriptStem);
+  });
 }
 
 function renderSessions() {
@@ -1396,16 +1429,23 @@ function filteredSessionsForSelectedRecording() {
   });
 }
 
-function selectRecording(recordingValue) {
+async function selectRecording(recordingValue, options = {}) {
   const value = getRecordingValue(recordingValue);
   if (Array.from(els.recordingSelect.options).some((option) => option.value === value)) {
     els.recordingSelect.value = value;
     handleRecordingSelectionChange();
+    if (options.loadMatchingSession) {
+      await loadBestSessionForSelectedRecording();
+    }
   }
 }
 
 function handleRecordingSelectionChange() {
   syncSessionIdPlaceholder();
+  renderTranscripts();
+  if (els.transcriptSelect.value && !filteredTranscriptsForSelectedRecording().some((transcript) => getTranscriptValue(transcript) === els.transcriptSelect.value)) {
+    els.transcriptSelect.value = "";
+  }
   if (state.selectedSessionId && !filteredSessionsForSelectedRecording().some((session) => getSessionId(session) === state.selectedSessionId)) {
     state.selectedSessionId = "";
     state.session = null;
@@ -1417,6 +1457,19 @@ function handleRecordingSelectionChange() {
   }
   renderSessions();
   renderAll();
+}
+
+async function loadBestSessionForSelectedRecording() {
+  const sessions = filteredSessionsForSelectedRecording();
+  if (sessions.length === 0) {
+    logActivity("No processed sessions found for that recording. Choose Process Recording to create one.", "warn");
+    return;
+  }
+  const session = sessions[0];
+  const sessionId = getSessionId(session);
+  if (!sessionId) return;
+  logActivity(`Selected ${sessions.length} session${sessions.length === 1 ? "" : "s"} for ${basename(els.recordingSelect.value)}.`);
+  await selectSession(sessionId, { load: true });
 }
 
 function renderSelectedSessionPill() {
@@ -2581,6 +2634,15 @@ function fileSlug(value, maxLength = 90) {
     .replace(/^-+|-+$/g, "")
     .slice(0, maxLength)
     .replace(/-+$/g, "");
+}
+
+function normalizeMediaStem(value) {
+  return String(value || "")
+    .replace(/\.(mp4|mkv|mov|webm|avi|wmv|m4v|txt|vtt|srt|json)$/i, "")
+    .replace(/(\.whisper-transcript|\.transcript|-whisper-transcript|-transcript|-en-us|-en_us)$/i, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 function getRecordingLabel(recording) {

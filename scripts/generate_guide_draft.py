@@ -40,6 +40,16 @@ def main() -> int:
 
     trace = json.loads(trace_path.read_text(encoding="utf-8"))
     trace = apply_frame_review(trace, trace_path)
+    if is_prototype_trace(trace):
+        draft = blocked_prototype_draft(trace, args)
+        draft = attach_screenshot_references(draft, trace)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(draft, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        report_path = write_generation_report(args.output, draft)
+        print(f"Trace is not ready for generation (prototype placeholders detected). Wrote blocked draft.")
+        print(f"Wrote {args.output.resolve()}")
+        print(f"Wrote {report_path.resolve()}")
+        return 0
     try:
         draft = generate_with_anthropic(trace, args)
     except AnthropicDraftError as exc:
@@ -607,7 +617,402 @@ def parse_remote_generation_result(trace: dict[str, Any], args: argparse.Namespa
         }
     )
     draft["usage"] = normalize_anthropic_usage(anthropic_result.get("usage"), args.model)
+    draft = enforce_generation_quality_rules(draft, trace)
     return draft
+
+
+def enforce_generation_quality_rules(draft: dict[str, Any], trace: dict[str, Any]) -> dict[str, Any]:
+    normalized = json.loads(json.dumps(draft))
+    normalize_source_recording_metadata(normalized, trace)
+    if trace_has_no_usable_transcript(trace):
+        return blocked_no_transcript_draft(normalized, trace)
+    consolidate_systemic_screenshot_failures(normalized, trace)
+    add_round_minute_timestamp_review(normalized)
+    ensure_review_001_duration(normalized, trace)
+    return normalized
+
+
+def trace_has_no_usable_transcript(trace: dict[str, Any]) -> bool:
+    segments = trace_segments(trace)
+    if not segments:
+        return True
+    has_speaker_text = any(str(segment.get("speakerText") or "").strip() for segment in segments)
+    transcript_confidences = [transcript_confidence(segment) for segment in segments]
+    explicit_confidences = [confidence for confidence in transcript_confidences if confidence is not None]
+    return not has_speaker_text or (bool(explicit_confidences) and all(confidence <= 0 for confidence in explicit_confidences))
+
+
+_PROTOTYPE_SPEAKER_INDICATORS = (
+    "prototype narration segment",
+    "replace this with local speech-to-text",
+)
+_PROTOTYPE_OCR_INDICATORS = (
+    "visible ui text pending",
+)
+_PROTOTYPE_NOTES_INDICATOR = "prototype segment generated before local stt/ocr are wired in"
+
+
+def is_prototype_segment(segment: dict[str, Any]) -> bool:
+    speaker = str(segment.get("speakerText") or "").strip().lower()
+    if not speaker or any(ind in speaker for ind in _PROTOTYPE_SPEAKER_INDICATORS):
+        return True
+    ocr = segment.get("visibleUiText")
+    if not ocr or (isinstance(ocr, list) and len(ocr) == 0):
+        return True
+    if isinstance(ocr, list) and all(any(ind in str(v).lower() for ind in _PROTOTYPE_OCR_INDICATORS) for v in ocr):
+        return True
+    notes = str(segment.get("notes") or "").strip().lower()
+    if _PROTOTYPE_NOTES_INDICATOR in notes:
+        return True
+    conf = transcript_confidence(segment)
+    if conf is not None and conf <= 0.0:
+        return True
+    return False
+
+
+def is_prototype_trace(trace: dict[str, Any]) -> bool:
+    segments = trace_segments(trace)
+    if not segments:
+        return False
+    prototype_count = sum(1 for seg in segments if is_prototype_segment(seg))
+    return prototype_count / len(segments) > 0.80
+
+
+def blocked_prototype_draft(trace: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    segments = trace_segments(trace)
+    recording = trace_recording(trace)
+    duration_seconds = safe_float(recording.get("durationSeconds"))
+    prototype_count = sum(1 for seg in segments if is_prototype_segment(seg))
+    pct = round(100 * prototype_count / len(segments)) if segments else 100
+    placeholder_step = {
+        "title": "PLACEHOLDER — requires complete trace",
+        "instruction": "PLACEHOLDER — requires complete trace",
+        "expectedResult": "PLACEHOLDER — requires complete trace",
+        "needsHumanReview": True,
+        "screenshotDecision": {
+            "needsHumanReview": True,
+            "reviewNote": "No usable trace content.",
+            "screenshotRef": None,
+        },
+    }
+    return {
+        "schemaVersion": 1,
+        "sessionId": trace.get("sessionId", ""),
+        "title": trace_title(trace) or recording_file_name(recording) or "Recording Guide",
+        "overallStatus": "BLOCKED — Trace not ready for generation.",
+        "status": "BLOCKED — Trace not ready for generation.",
+        "purpose": "Trace extraction is required before this recording can be converted into a usable guide.",
+        "sourceRecording": explicit_source_recording(recording),
+        "sections": [
+            {
+                "title": "PLACEHOLDER — requires complete trace",
+                "body": ["PLACEHOLDER — requires complete trace"],
+                "steps": [placeholder_step, placeholder_step, placeholder_step],
+            }
+        ],
+        "steps": [placeholder_step, placeholder_step, placeholder_step],
+        "openReviewItems": [
+            {
+                "id": "review-001",
+                "severity": "critical",
+                "description": (
+                    f"{pct}% of segments ({prototype_count} of {len(segments)}) contain prototype placeholder content. "
+                    f"Checks failed: speakerText placeholder or empty, visibleUiText placeholder or empty, "
+                    f"transcript confidence 0.0 or prototype notes detected. "
+                    f"Recording duration: {format_duration_human(duration_seconds)}. "
+                    f"Total segment count: {len(segments)}."
+                ),
+                "totalSegmentCount": len(segments),
+                "recordingDuration": format_duration_human(duration_seconds),
+                "resolution": (
+                    "Reprocess the recording with real speech-to-text and OCR extraction "
+                    "before submitting for guide generation."
+                ),
+            }
+        ],
+        "generatedAt": utc_timestamp(),
+        "model": {
+            "provider": "local",
+            "model": args.model,
+            "mode": "blocked-preflight",
+            "promptVersion": args.prompt_version,
+        },
+        "usage": {},
+    }
+
+
+def trace_segments(trace: dict[str, Any]) -> list[dict[str, Any]]:
+    segments = trace.get("segments") if isinstance(trace.get("segments"), list) else []
+    return [segment for segment in segments if isinstance(segment, dict)]
+
+
+def transcript_confidence(segment: dict[str, Any]) -> float | None:
+    confidence = segment.get("confidence")
+    if isinstance(confidence, dict):
+        if confidence.get("transcript") is None:
+            return None
+        return safe_float(confidence.get("transcript"))
+    if confidence is None:
+        return None
+    return safe_float(confidence)
+
+
+def safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def blocked_no_transcript_draft(draft: dict[str, Any], trace: dict[str, Any]) -> dict[str, Any]:
+    recording = trace_recording(trace)
+    duration_seconds = safe_float(recording.get("durationSeconds"))
+    steps = placeholder_steps_for_recording(recording, duration_seconds)
+    title = str(draft.get("title") or trace_title(trace) or recording_file_name(recording) or "Recording Guide").strip()
+    blocked = {
+        **draft,
+        "schemaVersion": 1,
+        "title": title,
+        "overallStatus": "BLOCKED — No transcript available.",
+        "status": "BLOCKED — No transcript available.",
+        "purpose": "Transcript extraction is required before this recording can be converted into a usable guide.",
+        "sourceRecording": explicit_source_recording(recording),
+        "sections": [
+            {
+                "title": "PLACEHOLDER — requires transcript",
+                "body": ["PLACEHOLDER — requires transcript"],
+                "steps": steps,
+            }
+        ],
+        "steps": steps,
+        "openReviewItems": [
+            {
+                "id": "review-001",
+                "severity": "critical",
+                "description": (
+                    f"No usable transcript was extracted. Segment count: {len(trace_segments(trace))}. "
+                    f"Recording duration: {format_duration_human(duration_seconds)}."
+                ),
+                "totalSegmentCount": len(trace_segments(trace)),
+                "recordingDuration": format_duration_human(duration_seconds),
+                "resolution": "Reprocess the recording with a usable transcript or local speech-to-text before generating the guide.",
+            }
+        ],
+    }
+    return blocked
+
+
+def placeholder_steps_for_recording(recording: dict[str, Any], duration_seconds: float) -> list[dict[str, Any]]:
+    count = 3 if duration_seconds < 1800 else 4 if duration_seconds < 3600 else 5
+    return [
+        {
+            "title": "PLACEHOLDER — requires transcript",
+            "instruction": "PLACEHOLDER — requires transcript",
+            "expectedResult": "PLACEHOLDER — requires transcript",
+            "needsHumanReview": True,
+            "screenshotDecision": {
+                "needsHumanReview": True,
+                "reviewNote": "No transcript available.",
+                "screenshotRef": None,
+            },
+        }
+        for _ in range(count)
+    ]
+
+
+def trace_recording(trace: dict[str, Any]) -> dict[str, Any]:
+    recording = trace.get("recording") if isinstance(trace.get("recording"), dict) else {}
+    source_recording = trace.get("sourceRecording") if isinstance(trace.get("sourceRecording"), dict) else {}
+    return {**source_recording, **recording}
+
+
+def explicit_source_recording(recording: dict[str, Any]) -> dict[str, Any]:
+    duration_seconds = safe_float(recording.get("durationSeconds"))
+    return {
+        "fileName": recording_file_name(recording),
+        "sourceFile": str(recording.get("sourceFile") or recording.get("fileName") or recording.get("sourceName") or ""),
+        "duration": format_duration_human(duration_seconds),
+        "durationSeconds": duration_seconds,
+        "captureMode": str(recording.get("captureMode") or "imported-recording"),
+    }
+
+
+def recording_file_name(recording: dict[str, Any]) -> str:
+    value = str(recording.get("fileName") or recording.get("sourceName") or recording.get("sourceFile") or "").strip()
+    return Path(value).name if value else ""
+
+
+def format_duration_human(seconds: Any) -> str:
+    total_seconds = max(0, int(round(safe_float(seconds))))
+    minutes, remaining = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    parts: list[str] = []
+    if hours:
+        parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+    if minutes:
+        parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+    if remaining or not parts:
+        parts.append(f"{remaining} second{'s' if remaining != 1 else ''}")
+    return " ".join(parts)
+
+
+def normalize_source_recording_metadata(draft: dict[str, Any], trace: dict[str, Any]) -> None:
+    existing = draft.get("sourceRecording") if isinstance(draft.get("sourceRecording"), dict) else {}
+    recording = {**trace_recording(trace), **existing}
+    draft["sourceRecording"] = explicit_source_recording(recording)
+
+
+def ensure_review_001_duration(draft: dict[str, Any], trace: dict[str, Any]) -> None:
+    recording = trace_recording(trace)
+    if recording.get("durationSeconds") is None:
+        return
+    items = ensure_open_review_items(draft)
+    review_001 = next((item for item in items if isinstance(item, dict) and item.get("id") == "review-001"), None)
+    if review_001 is None:
+        review_001 = {
+            "id": "review-001",
+            "severity": "info",
+            "description": "Recording scope context.",
+        }
+        items.insert(0, review_001)
+    duration = format_duration_human(recording.get("durationSeconds"))
+    review_001.setdefault("recordingDuration", duration)
+    description = str(review_001.get("description") or "").strip()
+    if duration and duration not in description:
+        review_001["description"] = f"{description} Recording duration: {duration}.".strip()
+
+
+def ensure_open_review_items(draft: dict[str, Any]) -> list[dict[str, Any]]:
+    items = draft.get("openReviewItems")
+    if not isinstance(items, list):
+        items = draft.get("reviewItems") if isinstance(draft.get("reviewItems"), list) else []
+        draft["openReviewItems"] = items
+    return items
+
+
+def consolidate_systemic_screenshot_failures(draft: dict[str, Any], trace: dict[str, Any]) -> None:
+    condition = systemic_screenshot_failure_condition(trace)
+    if not condition:
+        return
+    items = ensure_open_review_items(draft)
+    upsert_review_item(
+        items,
+        {
+            "id": "review-002",
+            "severity": "critical",
+            "description": condition,
+            "resolution": "Reviewer should recapture or approve usable application screenshots before publishing.",
+        },
+    )
+    for step in iter_draft_steps(draft):
+        step["screenshotDecision"] = {
+            "needsHumanReview": True,
+            "reviewNote": "See review-002.",
+            "screenshotRef": None,
+        }
+
+
+def systemic_screenshot_failure_condition(trace: dict[str, Any]) -> str:
+    images = [
+        image
+        for segment in trace_segments(trace)
+        for image in segment.get("candidateImages", [])
+        if isinstance(image, dict)
+    ]
+    if not images:
+        return ""
+    if all(str(image.get("reviewStatus") or "").lower() == "pending" for image in images):
+        return "All candidate screenshots are pending review."
+    if all(is_placeholder_ocr_image(image) for image in images):
+        return "All candidate screenshots have placeholder-only OCR evidence."
+    if all(image_confidence(image) < 0.5 for image in images):
+        return "All candidate screenshots are below the confidence threshold."
+    return ""
+
+
+def is_placeholder_ocr_image(image: dict[str, Any]) -> bool:
+    source = str(image.get("ocrSource") or image.get("source") or "").lower()
+    text = str(image.get("ocrText") or "").strip()
+    reason = str(image.get("recommendationReason") or image.get("reason") or "").lower()
+    return "placeholder" in source or "placeholder" in reason or not useful_ocr_text(text)
+
+
+def image_confidence(image: dict[str, Any]) -> float:
+    for key in ("frameEvidenceScore", "confidence", "score", "ocrConfidence"):
+        if image.get(key) is not None:
+            return safe_float(image.get(key))
+    return 0.0
+
+
+def upsert_review_item(items: list[dict[str, Any]], item: dict[str, Any]) -> None:
+    for index, existing in enumerate(items):
+        if isinstance(existing, dict) and existing.get("id") == item.get("id"):
+            items[index] = {**existing, **item}
+            return
+    items.append(item)
+
+
+def add_round_minute_timestamp_review(draft: dict[str, Any]) -> None:
+    timestamps = selected_screenshot_timestamps(draft)
+    if len(timestamps) < 2:
+        return
+    cadence_count = sum(1 for timestamp in timestamps if is_exact_minute_or_half_minute(timestamp))
+    if cadence_count / len(timestamps) <= 0.8:
+        return
+    upsert_review_item(
+        ensure_open_review_items(draft),
+        {
+            "id": "review-003",
+            "severity": "critical",
+            "description": "Screenshot timestamps appear cadence-based. Frame selection may not reflect actual UI state changes. Reviewer should treat all frame selections as approximate and recapture from source recording.",
+            "resolution": "Review selected screenshots against the source recording and recapture frames that do not match the documented step.",
+        },
+    )
+
+
+def selected_screenshot_timestamps(draft: dict[str, Any]) -> list[float]:
+    timestamps: list[float] = []
+    for step in iter_draft_steps(draft):
+        for value in screenshot_timestamp_values(step):
+            timestamps.append(value)
+            break
+    return timestamps
+
+
+def screenshot_timestamp_values(step: dict[str, Any]) -> list[float]:
+    values: list[float] = []
+    for container_key in ("selectedScreenshot", "selected_screenshot", "screenshotDecision"):
+        container = step.get(container_key)
+        if isinstance(container, dict):
+            for key in ("timestampSeconds", "timestamp_seconds"):
+                if container.get(key) is not None:
+                    values.append(safe_float(container.get(key)))
+            if container.get("timestamp"):
+                parsed = parse_timestamp_seconds(str(container["timestamp"]))
+                if parsed is not None:
+                    values.append(parsed)
+    for key in ("timestampSeconds", "timestamp_seconds"):
+        if step.get(key) is not None:
+            values.append(safe_float(step.get(key)))
+    return values
+
+
+def parse_timestamp_seconds(value: str) -> float | None:
+    parts = value.strip().split(":")
+    try:
+        if len(parts) == 3:
+            hours, minutes, seconds = parts
+            return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+        if len(parts) == 2:
+            minutes, seconds = parts
+            return int(minutes) * 60 + float(seconds)
+    except ValueError:
+        return None
+    return None
+
+
+def is_exact_minute_or_half_minute(seconds: float) -> bool:
+    return abs((seconds % 30)) < 0.001 or abs((seconds % 30) - 30) < 0.001
 
 
 def build_anthropic_payload(trace: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:

@@ -12,9 +12,9 @@ KCXDocumentor can run as a local Docker container while keeping recordings, proc
 - Cloud-backed endpoints still require Entra tokens: AI guide generation through the Azure Function proxy and AI Spend reads/writes in Cosmos DB.
 - DOCX creation is local. Cloud page-count reporting must not block the local DOCX build or download path.
 - Host folders are mounted into the container:
-  - `samples/raw` -> `/app/samples/raw`
-  - `samples/processed` -> `/app/samples/processed`
-  - `artifacts` -> `/app/artifacts`
+  - host `recordings` folder -> `/app/samples/raw`
+  - host processed-session folder -> `/app/samples/processed`
+  - host `artifacts` folder -> `/app/artifacts`
   - external Whisper share -> `/opt/kcxdocumentor/external/whisper`
 
 This keeps large recordings and generated documents on the local workstation filesystem and avoids rebuilding the image when Whisper binaries or models change.
@@ -51,8 +51,8 @@ Set `KCXDOC_BOOTSTRAP_WHISPER=false` when running in an offline enterprise envir
 Default Compose mappings use repo-local folders. Override them in `.env` when you want workstation-local folders:
 
 ```text
-KCXDOC_HOST_RAW_DIR=C:\KCXDocumentor\samples\raw
-KCXDOC_HOST_PROCESSED_DIR=C:\KCXDocumentor\samples\processed
+KCXDOC_HOST_RAW_DIR=C:\KCXDocumentor\recordings
+KCXDOC_HOST_PROCESSED_DIR=C:\KCXDocumentor\artifacts\processed
 KCXDOC_HOST_ARTIFACTS_DIR=C:\KCXDocumentor\artifacts
 KCXDOC_HOST_WHISPER_DIR=C:\KCXDocumentor\external\whisper
 KCXDOC_BOOTSTRAP_WHISPER=true
@@ -62,8 +62,8 @@ KCXDOC_WHISPER_UPDATE=latest
 On macOS or Linux, use native paths:
 
 ```text
-KCXDOC_HOST_RAW_DIR=/Users/djames/KCXDocumentor/samples/raw
-KCXDOC_HOST_PROCESSED_DIR=/Users/djames/KCXDocumentor/samples/processed
+KCXDOC_HOST_RAW_DIR=/Users/djames/KCXDocumentor/recordings
+KCXDOC_HOST_PROCESSED_DIR=/Users/djames/KCXDocumentor/artifacts/processed
 KCXDOC_HOST_ARTIFACTS_DIR=/Users/djames/KCXDocumentor/artifacts
 KCXDOC_HOST_WHISPER_DIR=/Users/djames/KCXDocumentor/external/whisper
 KCXDOC_BOOTSTRAP_WHISPER=true
@@ -172,7 +172,7 @@ If Compose reports that this socket is missing, Docker Desktop is not running or
 
 ## Notes
 
-- The app still uses the Azure Function proxy for Anthropic and AI Spend.
+- The app still uses the Azure Function proxy for Azure Foundry Claude generation and AI Spend.
 - The browser redirect URI remains `http://127.0.0.1:8765/`.
 - Local imports, processing, frame review, thumbnails, video preview, DOCX creation, QA, and artifact download are local-trust operations.
 - Expired Entra tokens should only interrupt AI creation and AI Spend reporting, not local review or download work.

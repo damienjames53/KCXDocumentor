@@ -18,6 +18,8 @@ from build_prototype_collateral_docx import (
 )
 
 
+# Keep the original SharePoint filename for link continuity. The document title
+# has been updated to reflect the current Azure Foundry provider path.
 OUTPUT = OUT_DIR / "KCXDocumentor - Anthropic API Data Protection Brief.docx"
 
 
@@ -32,27 +34,30 @@ def add_doc_control(doc: Document, spec: DocSpec) -> None:
             ["Status", spec.status],
             ["Owner", spec.owner],
             ["Audience", spec.audience],
-            ["Review Basis", "Anthropic public documentation reviewed on 2026-06-05"],
+            ["Review Basis", "Microsoft Foundry Claude and Anthropic API documentation reviewed on 2026-06-07"],
         ],
     )
     doc.add_heading("Version History", level=1)
     _table(
         doc,
         ["Version", "Date", "Summary"],
-        [["1.0", date.today().isoformat(), "Initial executive data protection and BAA readiness brief."]],
+        [
+            ["1.0", "2026-06-05", "Initial first-party Anthropic API data protection and BAA readiness brief."],
+            ["2.0", date.today().isoformat(), "Updated for Azure Foundry Claude, Azure Function proxy, Cosmos usage reporting, and Marketplace billing caveats."],
+        ],
     )
 
 
 def build() -> Path:
     spec = DocSpec(
-        title="KCXDocumentor - Anthropic API Data Protection Brief",
-        subtitle="Executive review of API data use, PHI/PII exposure, and BAA readiness",
+        title="KCXDocumentor - Azure Foundry Claude Data Protection Brief",
+        subtitle="Executive review of AI data flow, PHI/PII exposure, Marketplace billing, and compliance readiness",
         document_id="KCXDOC-DATA-001",
         status="Executive review",
         owner="keycentrix Engineering and Product",
         audience="Executive Team, Security, Compliance, Product, Training, Implementation, and Engineering",
-        purpose="Summarize Anthropic API data-use protections and the additional requirements needed before KCXDocumentor is used with protected health information or sensitive personal information.",
-        scope="Focused on KCXDocumentor use of Anthropic's first-party API for guide generation. This brief does not evaluate Claude consumer products, Claude Team plans, partner-hosted model platforms, or third-party integrations.",
+        purpose="Summarize the current KCXDocumentor AI provider path and the protections, caveats, and product controls needed before the application is used with protected health information or sensitive personal information.",
+        scope="Focused on KCXDocumentor guide generation through Microsoft Foundry Claude Sonnet 4.6 behind an authenticated Azure Function proxy. This brief does not evaluate Claude consumer products, Claude Team or Enterprise product interfaces, direct Anthropic API production use, or unrelated third-party integrations.",
         sections=[],
         output_name=OUTPUT.name,
     )
@@ -78,86 +83,90 @@ def build() -> Path:
     _callout(
         doc,
         "Recommended executive position",
-        "KCXDocumentor should continue using the local-first architecture, but production use with PHI should wait until Anthropic HIPAA-ready API access is enabled under a signed BAA and the application enforces PHI-aware controls.",
+        "KCXDocumentor may continue the pilot with synthetic, internal, or de-identified recordings using the current Azure Foundry Claude path. PHI-bearing production use should wait until Security and Compliance confirm the selected Foundry Claude Marketplace terms, Anthropic processor terms, Microsoft DPA posture, region behavior, and PHI-mode controls are acceptable.",
     )
     _bullets(
         doc,
         [
-            "Anthropic's Commercial Terms state that customer inputs and outputs remain customer content and are not used to train Anthropic models.",
-            "Anthropic's published standard API retention says API inputs and outputs are automatically deleted within 30 days, subject to exceptions for law, usage-policy enforcement, certain longer-retention features, or agreed alternatives.",
-            "Anthropic offers zero data retention arrangements for eligible enterprise API customers and HIPAA-ready API access with a signed Business Associate Agreement.",
-            "For KCXDocumentor, raw recordings stay local, but transcript excerpts, OCR text, reviewer notes, approved screenshot context, and generated guide content can still contain PHI or PII if the source recording contains it.",
-            "Until BAA coverage and HIPAA-ready API organization controls are active, the safest operating rule is to avoid sending PHI to Anthropic and to use de-identified or internal-only test data.",
+            "The desktop app no longer calls Anthropic directly. It sends compact prompt data to the authenticated Azure Function configured for Azure Foundry Claude.",
+            "Raw recordings, extracted audio, frame sets, OCR artifacts, processed traces, DOCX files, and local QA artifacts remain on the workstation.",
+            "The Azure Function validates the signed-in user, schedules generation, calls Azure Foundry Claude, records success or failure usage, and stores AI Spend metadata in Cosmos DB.",
+            "Microsoft documentation for Claude in Foundry states that Anthropic is the processor for prompts and outputs, while Microsoft manages the API deployment infrastructure and billing/usage processing.",
+            "Claude in Foundry is a Microsoft Marketplace model path. Marketplace billing and model-publisher terms must be reviewed separately from standard Azure credits or ordinary Azure service assumptions.",
+            "For PHI/PII risk, the sensitive transmission points are transcript excerpts, OCR text, reviewer notes, approved screenshot context, and generated guide content, not the raw video file.",
         ],
     )
 
-    doc.add_heading("KCXDocumentor Data Flow Considerations", level=1)
+    doc.add_heading("Current KCXDocumentor AI Path", level=1)
+    _table(
+        doc,
+        ["Layer", "Current Handling", "Protection / Caveat"],
+        [
+            ["Desktop app", "Runs locally in Docker on the user's workstation.", "No provider key is stored on the workstation. The app authenticates the user with Microsoft Entra MSAL + PKCE."],
+            ["Local processing", "FFmpeg, Whisper, OCR, frame scoring, frame review, DOCX build, and QA run locally.", "Large media and guide artifacts stay in mapped local folders."],
+            ["Prompt payload", "Only compact reviewed context is sent for generation.", "Prompt data can still contain PHI/PII if the recording, OCR, transcript, or reviewer notes contain it."],
+            ["Azure Function", "Acts as the server-side policy boundary.", "Validates user tokens, queues generation, enforces token scheduling, calls Foundry, and records usage/failure details."],
+            ["Azure Foundry Claude", "Uses Claude Sonnet 4.6 through the Foundry Marketplace deployment.", "Anthropic processes prompts and outputs for the Claude API; Microsoft manages deployment infrastructure and usage/billing processing."],
+            ["Cosmos DB AI Spend", "Stores usage, document, owner, page count, cost estimate, status, and failure metadata.", "Usage records must avoid PHI in titles, session names, failure reasons, or free-text metadata."],
+        ],
+    )
+
+    doc.add_heading("Data Flow Risk Considerations", level=1)
     _table(
         doc,
         ["Data Element", "Current Handling", "Executive Risk View"],
         [
-            ["Raw video recording", "Processed locally on the workstation.", "Lowest vendor exposure if raw video is never sent to Anthropic."],
-            ["Speech transcript", "Used to create compact guide context.", "Can contain PHI/PII if a recording includes patient names, prescription details, identifiers, or support context."],
-            ["OCR and screen text", "Extracted locally and summarized into the trace.", "Can expose patient, pharmacy, employee, account, or workflow-sensitive details."],
-            ["Reviewer notes", "Used to steer guide generation.", "Can introduce PHI/PII if reviewers type identifiers or case details."],
-            ["Approved screenshots", "May be included or represented in the guide-generation context.", "Image content can include PHI/PII if screens are not masked or reviewed."],
-            ["Generated guide output", "Returned by Anthropic and stored locally.", "May restate sensitive content unless prompts and QA rules prevent it."],
+            ["Raw video recording", "Processed locally on the workstation.", "Lowest vendor exposure if raw video is never sent to the Azure Function or model provider."],
+            ["Speech transcript", "Generated locally with Whisper or imported as a sidecar and summarized into prompt context.", "Can contain PHI/PII if narration includes patient, prescription, account, or support details."],
+            ["OCR and screen text", "Extracted locally and used as visible UI evidence.", "Can expose patient, pharmacy, employee, account, or workflow-sensitive details shown on screen."],
+            ["Reviewer notes", "Used to steer guide generation and explain uncertainty.", "Can introduce PHI/PII if reviewers type identifiers, case details, or customer-specific context."],
+            ["Approved screenshots", "Selected locally for guide context and final DOCX output.", "Image content can include PHI/PII if screens are not masked, de-identified, or reviewed."],
+            ["Prompt payload", "Sent to the Azure Function and then to Azure Foundry Claude.", "Primary cloud data exposure point; must be minimized and governed."],
+            ["Generated guide output", "Returned by Claude, built into a local DOCX, and optionally downloaded by the user.", "May restate sensitive content unless prompts, QA, and human review prevent it."],
+            ["Usage reporting", "Stored in Cosmos DB for AI Spend visibility.", "Should remain operational metadata only and should not include patient or customer identifiers."],
         ],
     )
 
-    doc.add_heading("Published Anthropic Protections Relevant To API Use", level=1)
+    doc.add_heading("Published Protections And Caveats", level=1)
     _table(
         doc,
-        ["Protection", "Published Position", "Meaning For KCXDocumentor"],
+        ["Topic", "Published Position", "Meaning For KCXDocumentor"],
         [
-            ["Model training", "Anthropic's Commercial Terms state that Anthropic may not train models on customer content from Services.", "This supports use of the API for confidential documentation workflows, subject to contract and data-handling review."],
-            ["Customer ownership", "Customer retains inputs and owns outputs under the Commercial Terms, to the extent permitted by law.", "Generated guides should remain keycentrix/customer-controlled deliverables."],
-            ["Standard retention", "API inputs and outputs are deleted within 30 days by default, with stated exceptions.", "Default API use is not zero retention and should not be treated as sufficient for PHI without a covered arrangement."],
-            ["Policy enforcement retention", "Flagged inputs and outputs may be retained longer for usage-policy enforcement; classifier scores may be retained longer.", "Sensitive data should be minimized even when using the standard API because exception paths exist."],
-            ["Zero data retention", "Eligible enterprise API customers may have arrangements where inputs and outputs are not stored at rest after the response, except for law or misuse needs.", "ZDR is a strong control for regulated or sensitive workloads but requires Anthropic approval and contract confirmation."],
-            ["HIPAA-ready API", "Anthropic supports HIPAA-ready API integrations with a signed BAA and a HIPAA-enabled organization.", "Production PHI use should be routed through the HIPAA-ready organization, not a general API organization."],
+            ["Azure Foundry Claude data processing", "Microsoft states that for Claude in Foundry, Anthropic acts as the data processor for prompts and outputs, while Microsoft manages the API deployment infrastructure.", "Azure routing does not eliminate Anthropic data processing. Compliance review must consider both Microsoft and Anthropic terms."],
+            ["Regional processing", "Microsoft states that Claude prompts and outputs may be processed outside the selected region for operational purposes.", "Do not assume single-region processing for PHI-sensitive workflows without formal compliance approval."],
+            ["Marketplace transaction", "Microsoft states that Marketplace contact, transaction, billing, and usage details may be shared with the model publisher.", "Marketplace billing and publisher visibility must be reviewed before moving to a production subscription."],
+            ["Marketplace terms", "Microsoft Product Terms state that Azure Marketplace products are subject to separate Marketplace terms.", "Standard Azure credits or consumption commitments may not cover Claude Marketplace usage."],
+            ["Anthropic retention and training", "Anthropic documents API data-retention options, ZDR arrangements, and that retained API data is not used for model training without permission.", "This supports confidential use, but does not by itself approve PHI workflows."],
+            ["Anthropic HIPAA-ready API", "Anthropic documents HIPAA-ready API access with a signed BAA and a HIPAA-enabled organization for eligible Claude API features.", "This is relevant but must be mapped carefully to the Foundry Marketplace path before PHI use is approved."],
+            ["Unsupported features", "Anthropic documents that some API features are not ZDR or HIPAA eligible.", "KCXDocumentor should keep guide generation limited to Messages-style behavior and avoid Files API, tools, web fetch, MCP connectors, and agent features for PHI workflows unless explicitly approved."],
         ],
     )
 
-    doc.add_heading("BAA And HIPAA-Ready Requirements", level=1)
-    _table(
-        doc,
-        ["Requirement", "What Anthropic Publishes", "KCXDocumentor Action"],
-        [
-            ["Signed BAA", "To use the first-party API with PHI, the organization administrator must sign a BAA and contact sales to enable it.", "Begin Anthropic sales/BAA process before allowing PHI-bearing recordings."],
-            ["HIPAA-enabled organization", "Anthropic provisions a dedicated organization with HIPAA readiness controls and feature restrictions.", "Use a separate Anthropic organization/API key for HIPAA-ready KCXDocumentor generation."],
-            ["Eligible features only", "HIPAA-enabled organizations block non-eligible features; not all API features are covered.", "Keep guide generation on covered Messages API behavior and avoid unsupported features."],
-            ["No Console or Workbench use", "Console and Workbench are not covered under the BAA for this API use case.", "Do not paste KCXDocumentor prompt payloads containing PHI into Console, Workbench, or consumer Claude surfaces."],
-            ["Third-party integrations", "External tools and third-party data flows are not covered by Anthropic's BAA.", "Keep the Azure Function proxy limited to Anthropic API calls and avoid web search, external MCPs, or third-party tools for PHI content."],
-            ["Feature limitations", "Batch API, Files API, Skills API, Code Execution, Computer Use, and Web Fetch are not covered for HIPAA-ready API users per Anthropic's BAA coverage table.", "Do not use these features for PHI workflows unless Anthropic contract terms later explicitly cover them."],
-            ["Schema restrictions", "Anthropic warns not to place PHI in JSON schema definitions, enum values, constants, or patterns because those cached schemas do not receive the same PHI protections as message content.", "Ensure KCXDocumentor schemas and tool definitions are generic and never patient- or transaction-specific."],
-        ],
-    )
-
-    doc.add_heading("Recommended Product Controls Before PHI Use", level=1)
+    doc.add_heading("Required Controls Before PHI Use", level=1)
     _bullets(
         doc,
         [
-            "Create a PHI mode that blocks guide generation unless the configured API endpoint is tied to a HIPAA-ready Anthropic organization under a signed BAA.",
-            "Add a preflight warning that identifies transcript, OCR, reviewer notes, and approved screenshots as possible PHI/PII transmission points.",
-            "Add redaction or masking options for patient names, dates of birth, prescription identifiers, phone numbers, addresses, email addresses, MRNs, and account numbers before prompt assembly.",
-            "Maintain the current backend proxy pattern so API keys are never exposed in browser JavaScript.",
-            "Keep raw recordings, extracted frames, and generated files in mapped local folders with workstation access controls.",
-            "Log only operational metadata needed for audit and cost reporting; avoid storing PHI in cloud usage records, file names, session names, or telemetry.",
-            "Disable or block unsupported Anthropic features for KCXDocumentor PHI workflows, including Files API, batch processing, web fetch, external tools, and non-covered beta features.",
-            "Document a user-facing rule: recordings used for customer-facing guide generation should be de-identified unless the HIPAA-ready/BAA path is active.",
+            "Create a PHI mode that blocks guide generation unless the approved provider path, terms, and compliance controls are active.",
+            "Add a preflight warning that identifies transcript, OCR, reviewer notes, approved screenshots, document titles, and usage metadata as possible PHI/PII exposure points.",
+            "Add local redaction or masking options for patient names, dates of birth, prescription identifiers, phone numbers, addresses, email addresses, MRNs, account numbers, and customer-specific support identifiers before prompt assembly.",
+            "Keep API keys only in Azure Function App settings. Do not store Anthropic or Azure Foundry provider keys on workstations.",
+            "Keep raw recordings, extracted frames, processed traces, generated DOCX files, and QA output in mapped local folders with workstation access controls.",
+            "Log only operational metadata needed for audit and cost reporting. Avoid PHI in cloud usage records, file names, session names, generated titles, or telemetry.",
+            "Disable or block unsupported model features for PHI workflows, including Files API, batch processing, web fetch, external tools, MCP connectors, code execution, and non-covered beta features unless Compliance explicitly approves them.",
+            "Document a user-facing pilot rule: recordings used for guide generation must be synthetic, internal-only, or de-identified unless the PHI-ready path is approved.",
         ],
     )
 
     doc.add_heading("Decision Matrix", level=1)
     _table(
         doc,
-        ["Operating Scenario", "Allowed For Demo?", "Allowed For PHI?", "Recommended Control"],
+        ["Operating Scenario", "Allowed For Pilot?", "Allowed For PHI?", "Recommended Control"],
         [
-            ["Internal demo with synthetic or de-identified data", "Yes", "No PHI present", "Use current API path with local-first controls and reviewer QA."],
-            ["Internal workflow recording with possible PII but no PHI", "Conditional", "Not applicable", "Minimize, redact, and confirm business approval before API generation."],
-            ["Recording that may show PHI", "No, unless de-identified", "Not under standard API path", "Require signed BAA, HIPAA-ready API organization, and PHI mode controls."],
-            ["Production customer-facing documentation from real pharmacy workflows", "Conditional", "Only with covered controls", "Use HIPAA-ready API access or ensure complete de-identification before generation."],
+            ["Internal demo with synthetic or de-identified data", "Yes", "No PHI present", "Use current Azure Function and Azure Foundry Claude path with local-first controls and reviewer QA."],
+            ["Internal workflow recording with possible PII but no PHI", "Conditional", "Not applicable", "Minimize, redact, and confirm business approval before generation."],
+            ["Recording that may show PHI", "No, unless de-identified", "Not yet approved", "Require Compliance approval of Foundry Claude terms, PHI mode, redaction checks, and logging controls."],
+            ["Production customer-facing documentation from real pharmacy workflows", "Conditional", "Only with covered controls", "Use the approved PHI-ready provider path or ensure complete de-identification before generation."],
+            ["Direct first-party Anthropic API production path", "No", "No", "Do not use unless a separate approved architecture, BAA, and key-management model are established."],
         ],
     )
 
@@ -165,11 +174,11 @@ def build() -> Path:
     _bullets(
         doc,
         [
-            "Decide whether KCXDocumentor will be permitted to process PHI-bearing recordings, or whether all pilot recordings must be de-identified.",
-            "If PHI use is expected, start the Anthropic BAA and HIPAA-ready API enablement process before expanding the pilot.",
-            "Assign Security/Compliance review of KCXDocumentor's prompt payload, logging, storage, and UI warnings.",
-            "Define whether ZDR is required as an additional contractual control even though Anthropic now documents HIPAA-ready API access separately from ZDR.",
-            "Approve product work for PHI mode, redaction checks, and unsupported-feature blocking before regulated production use.",
+            "Confirm whether KCXDocumentor pilot recordings must be fully de-identified or may include limited non-PHI business context.",
+            "Assign Security and Compliance review of the Azure Foundry Claude Marketplace terms, Anthropic processor terms, Microsoft DPA posture, region behavior, and Marketplace billing implications.",
+            "Decide whether the organization requires a formal Anthropic BAA path, a Microsoft/Marketplace confirmation path, or both before PHI-bearing production use.",
+            "Approve or defer PHI mode, local redaction checks, metadata hygiene checks, and unsupported-feature blocking.",
+            "Confirm that the target Azure subscription payment method covers Marketplace charges before moving production usage to a company subscription.",
         ],
     )
 
@@ -178,12 +187,17 @@ def build() -> Path:
         doc,
         ["Source", "Reviewed Topic"],
         [
-            ["Anthropic Commercial Terms of Service, effective June 17, 2025", "Customer content ownership, no model training on customer content, data processing and confidentiality obligations."],
-            ["Anthropic API and Data Retention documentation", "Standard retention, zero data retention, HIPAA readiness, PHI handling guidelines, unsupported features, and backend proxy guidance."],
-            ["Anthropic Privacy Center: How long do you store my organization's data?", "30-day API retention, usage-policy exception retention, feedback retention, and legal exceptions."],
-            ["Anthropic Privacy Center: Zero data retention agreement scope", "ZDR scope, covered products, and limitations."],
-            ["Claude Help Center: Business Associate Agreements for Commercial Customers", "BAA availability, required activation, covered and excluded product surfaces, and API feature coverage."],
+            ["Microsoft Learn: Data, privacy, and security for Anthropic Claude models in Microsoft Foundry, updated 2026-05-18", "Anthropic processor role, Microsoft deployment infrastructure role, Marketplace information sharing, and regional processing caveat."],
+            ["Microsoft Product Terms for Microsoft Azure", "Marketplace terms, Foundry Models distinctions, and separate terms for third-party models and Marketplace products."],
+            ["Anthropic API and Data Retention documentation", "Standard retention, zero data retention, HIPAA-ready API access, PHI handling guidance, and unsupported feature eligibility."],
+            ["Anthropic Commercial Terms and Data Processing Addendum", "Customer content ownership, model-training restrictions, and Anthropic processor terms for commercial API use."],
+            ["KCXDocumentor implementation plan", "Current local-first architecture, Azure Function proxy, Azure Foundry provider settings, Cosmos usage reporting, and queue/token controls."],
         ],
+    )
+
+    doc.add_heading("Recipe Alignment", level=1)
+    doc.add_paragraph(
+        "Built as a keycentrix internal artifact using the DamienDev document recipe structure: control metadata, version history, purpose, scope, audience, governance, process detail, decision matrix, and source appendix."
     )
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)

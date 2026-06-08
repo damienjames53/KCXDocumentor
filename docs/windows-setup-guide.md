@@ -32,8 +32,8 @@ Confirm the workstation has:
 Create the local working folders before starting the container:
 
 ```powershell
-New-Item -ItemType Directory -Force C:\KCXDocumentor\samples\raw
-New-Item -ItemType Directory -Force C:\KCXDocumentor\samples\processed
+New-Item -ItemType Directory -Force C:\KCXDocumentor\recordings
+New-Item -ItemType Directory -Force C:\KCXDocumentor\artifacts\processed
 New-Item -ItemType Directory -Force C:\KCXDocumentor\artifacts
 New-Item -ItemType Directory -Force C:\KCXDocumentor\external\whisper
 ```
@@ -42,8 +42,8 @@ Use these folders as follows:
 
 | Folder | Purpose |
 |---|---|
-| `C:\KCXDocumentor\samples\raw` | KCXDocumentor stores imported source videos and optional transcript files here. |
-| `C:\KCXDocumentor\samples\processed` | KCXDocumentor writes local processing sessions here. |
+| `C:\KCXDocumentor\recordings` | KCXDocumentor stores imported source videos and optional transcript files here. |
+| `C:\KCXDocumentor\artifacts\processed` | KCXDocumentor writes local processing sessions here. |
 | `C:\KCXDocumentor\artifacts` | Generated DOCX files and QA artifacts are written here. |
 | `C:\KCXDocumentor\external\whisper` | Runtime Whisper binaries and models are stored here. |
 
@@ -60,8 +60,8 @@ Open `.env` and confirm these required values are present:
 ```text
 KCXDOC_REMOTE_API_BASE_URL=https://kcxdocumentor-ai-dev.azurewebsites.net
 
-KCXDOC_HOST_RAW_DIR=C:/KCXDocumentor/samples/raw
-KCXDOC_HOST_PROCESSED_DIR=C:/KCXDocumentor/samples/processed
+KCXDOC_HOST_RAW_DIR=C:/KCXDocumentor/recordings
+KCXDOC_HOST_PROCESSED_DIR=C:/KCXDocumentor/artifacts/processed
 KCXDOC_HOST_ARTIFACTS_DIR=C:/KCXDocumentor/artifacts
 KCXDOC_HOST_WHISPER_DIR=C:/KCXDocumentor/external/whisper
 ```
@@ -73,9 +73,9 @@ The app and Docker Compose already provide defaults for:
 - Microsoft Entra tenant, client ID, authority, scopes, and local redirect URLs.
 - Whisper bootstrap and update behavior.
 - Container-internal Whisper paths.
-- Anthropic model and prompt version.
+- Claude model and prompt version.
 
-Do not put an Anthropic API key in the local `.env` file. The key belongs on the Azure Function App, not on tester workstations.
+Do not put Anthropic or Azure Foundry provider keys in the local `.env` file. The production Foundry key belongs on the Azure Function App, not on tester workstations.
 
 ## Sign In To GitHub Container Registry
 
@@ -158,7 +158,7 @@ Use the KCXDocumentor UI as the primary way to add test files:
 KCXDocumentor copies imported files into the mapped raw working folder automatically:
 
 ```text
-C:\KCXDocumentor\samples\raw
+C:\KCXDocumentor\recordings
 ```
 
 Manual copy is still acceptable for technical setup or batch preparation. If you copy files manually, place the source recording and any sidecar transcript in the same folder.
@@ -237,14 +237,14 @@ docker compose up -d
 | Docker cannot connect | Confirm Docker Desktop is running and fully started. |
 | The browser cannot open the app | Confirm `docker compose ps` shows port `8765`. |
 | Sign-in fails | Confirm the Entra app registration allows `http://127.0.0.1:8765/` and the user is allowed to sign in. |
-| The app shows no recordings | Confirm the video is in `C:\KCXDocumentor\samples\raw` and the `.env` path points to that folder. |
+| The app shows no recordings | Confirm the video is in `C:\KCXDocumentor\recordings` and the `.env` path points to that folder. |
 | Whisper is unavailable | Check logs and confirm `C:\KCXDocumentor\external\whisper` is writable. |
 | Guide creation fails | Check Latest Activity in the UI. The Azure Function API must be reachable and the signed-in user token must be valid. |
 | AI Spend does not load | Confirm the Azure Function API is reachable and the user is signed in. |
 
 ## Support Notes
 
-- The local app sends compact prompt data to the Azure Function API. It does not send raw videos to Anthropic.
+- The local app sends compact prompt data to the Azure Function API. It does not send raw videos to Azure Foundry or Anthropic.
 - Recordings, extracted frames, and DOCX files remain in the mapped local folders.
-- The local workstation should not store Anthropic API keys.
+- The local workstation should not store Anthropic or Azure Foundry provider keys.
 - The browser URL and redirect URI remain `http://127.0.0.1:8765/`.

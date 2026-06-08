@@ -89,7 +89,7 @@ The prototype already includes:
 - Windows-friendly folder mapping.
 - Runtime Whisper setup.
 - Microsoft Entra sign-in with MSAL + PKCE.
-- Azure Function proxy for Anthropic.
+- Azure Function proxy for Azure Foundry Claude.
 - Cosmos-backed AI Spend reporting.
 - Private GitHub Container Registry distribution.
 

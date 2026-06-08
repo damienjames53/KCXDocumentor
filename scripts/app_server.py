@@ -609,8 +609,34 @@ def process_recording(body: dict[str, Any]) -> dict[str, Any]:
     if result["returnCode"] == 0 and resolved_session_id:
         session_dir = PROCESSED_ROOT / resolved_session_id
         if session_dir.exists():
+            generated_transcript = persist_generated_transcript_sidecar(recording, session_dir)
+            if generated_transcript:
+                response["generatedTranscript"] = generated_transcript
             response["session"] = read_session(session_dir)
     return response
+
+
+def persist_generated_transcript_sidecar(recording: Path, session_dir: Path) -> dict[str, Any] | None:
+    transcript_path = session_dir / "transcript.json"
+    if not transcript_path.exists():
+        return None
+    transcript = read_json_if_exists(transcript_path)
+    if transcript.get("source") != "local-whisper":
+        return None
+    if not isinstance(transcript.get("segments"), list) or not transcript["segments"]:
+        return None
+
+    sidecar_name = f"{recording.stem}.whisper-transcript.json"
+    sidecar_path = RAW_ROOT / sidecar_name
+    sidecar_payload = {
+        **transcript,
+        "recordingName": recording.name,
+        "recordingPath": str(recording),
+        "sourceSessionId": session_dir.name,
+        "sourceSessionTranscript": relative_to_workspace(transcript_path),
+    }
+    sidecar_path.write_text(json.dumps(sidecar_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return describe_raw_file(sidecar_path)
 
 
 def start_local_generation_job(body: dict[str, Any], bearer_token: str = "") -> dict[str, Any]:

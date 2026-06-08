@@ -60,7 +60,7 @@ Security controls for this local-trust model:
 
 ## Azure Foundry And BAA Direction
 
-KCXDocumentor should move production AI generation from the first-party Anthropic API key path to Claude Sonnet 4.6 deployed through Microsoft Foundry in Azure. The goal is to keep the current local-first processing boundary while routing the compact prompt payload through Azure services covered by the organization's Microsoft commercial terms and HIPAA BAA posture.
+KCXDocumentor production AI generation uses Claude Sonnet 4.6 deployed through Microsoft Foundry in Azure instead of a direct first-party Anthropic API key path. The goal is to keep the current local-first processing boundary while routing the compact prompt payload through Azure services covered by the organization's Microsoft commercial terms and HIPAA BAA posture.
 
 Current target architecture:
 
@@ -70,6 +70,7 @@ Current target architecture:
 - Deploy `claude-sonnet-4-6` as a Global Standard deployment named `claude-sonnet-4-6`.
 - Size the deployment at capacity `80`, which currently yields `80 RPM` and `80,000 TPM` under the available Claude Sonnet 4.6 quota.
 - Configure the Function App with `KCXDOC_AI_PROVIDER=azure-foundry`, `KCXDOC_FOUNDRY_RESOURCE_NAME`, `KCXDOC_FOUNDRY_MESSAGES_URL`, `KCXDOC_FOUNDRY_API_KEY`, and `KCXDOC_ANTHROPIC_MODEL=claude-sonnet-4-6`.
+- Do not store Anthropic or Azure Foundry provider keys on tester workstations.
 - Continue storing usage records in Cosmos DB so AI Spend reporting survives local session deletion.
 - Treat the Azure Function as the server-side policy boundary: it validates the signed-in user token, calls Foundry, records success/failure usage, and returns only the guide JSON/report to the local app.
 
@@ -241,6 +242,10 @@ Implemented review-gate improvements:
 - System-rejected screenshots are not sent to the AI payload unless a reviewer explicitly approves them. User-rejected screenshots remain excluded and their notes continue to feed reviewer guidance.
 - Screenshot gaps are surfaced as structured `screenshotGapTasks` and in the UI readiness checks before guide creation.
 - Frames added through the video picker now run local visual scoring and Tesseract OCR when available, are mapped to the selected segment, and carry compact OCR/evidence context into guide generation unless rejected.
+- Zero-transcript generation is blocked into a 3-5 step placeholder guide instead of creating one false step per segment. `review-001` records segment count, human-readable duration, and the missing-transcript condition.
+- Systemic screenshot failures are consolidated into one critical review item. Affected steps reference `review-002` instead of repeating the full diagnostic in every step.
+- Cadence-based screenshot timestamps are detected when selected screenshots mostly land on exact minute or half-minute marks, producing a separate critical review note for recapture.
+- Source recording metadata is serialized as explicit fields such as filename, duration, and capture mode instead of raw source objects.
 
 ## Recommended Stack
 
@@ -255,7 +260,7 @@ Implemented review-gate improvements:
 | Metadata store | SQLite | Simple local session database |
 | Trace format | JSON files plus asset folder | Small, inspectable, easy to replay in tests |
 | DOCX rendering | Open XML SDK long term; local `python-docx` helper for prototype | Deterministic document output with local keycentrix styling |
-| AI provider | Claude Sonnet 4.6 through Microsoft Foundry for production; first-party Anthropic only for non-PHI development fallback when explicitly configured | Keeps the model capability while improving Azure/BAA alignment and centralizing provider keys in the Function App |
+| AI provider | Claude Sonnet 4.6 through Microsoft Foundry for production | Keeps the model capability while improving Azure/BAA alignment and centralizing provider keys in the Function App |
 | UI standard | KCXUIComponents semantic tokens and primitives | Keeps KCXDocumentor aligned with current KCX product UI conventions |
 | Local container | Docker Compose with host-mounted folders | Keeps the internal app easy to run while preserving workstation-local recordings and generated artifacts |
 
@@ -392,7 +397,7 @@ This starts as a local web page that reads the processed session bundle and writ
 
 The review surface should use the KCXUIComponents visual standard even during the prototype stage so the workflow can graduate into either a web client or Windows client without rethinking the product ergonomics.
 
-The current Blink Rx test showed that Anthropic can produce useful procedure prose, but the generated DOCX is not customer-ready unless the reviewer concerns are handled correctly. Reviewer concerns such as unclear transcript stretches, screenshot approval, UI evidence, source timing, placeholder OCR, and confidence issues must appear in Word comments or reviewer-only fallback sections, not in the visible guide body.
+The current Blink Rx test showed that Claude can produce useful procedure prose, but the generated DOCX is not customer-ready unless the reviewer concerns are handled correctly. Reviewer concerns such as unclear transcript stretches, screenshot approval, UI evidence, source timing, placeholder OCR, and confidence issues must appear in Word comments or reviewer-only fallback sections, not in the visible guide body.
 
 Current frame review behavior:
 
@@ -430,7 +435,7 @@ Current observed baseline for the regenerated Blink Rx lanes:
 
 A generated DOCX is not customer-ready just because it exists or passes normal QA. The gate for a customer-facing artifact is:
 
-- Anthropic draft generated from the best available transcript source: sidecar transcript first, local Whisper only when no transcript is available.
+- Claude draft generated from the best available transcript source: sidecar transcript first, local Whisper only when no transcript is available.
 - Frame review completed before final generation or DOCX build.
 - Approved screenshots embedded in the DOCX; rejected screenshots excluded.
 - No visible AI thought process, prompt text, raw JSON, placeholder confidence text, or internal QA language in the guide body.
@@ -439,7 +444,7 @@ A generated DOCX is not customer-ready just because it exists or passes normal Q
 - Rendered DOCX visual QA passes after screenshots are embedded.
 - The visible body reads like a user guide with actionable second-person procedure steps, not a transcript summary.
 
-The older Anthropic Blink artifacts are retained only as evidence. They are not considered customer-ready: one passed strict text QA but was visibly incomplete with only one embedded image, and another had more useful procedures/screenshots but failed strict QA because placeholder-confidence language leaked into the body.
+The older Claude Blink artifacts are retained only as evidence. They are not considered customer-ready: one passed strict text QA but was visibly incomplete with only one embedded image, and another had more useful procedures/screenshots but failed strict QA because placeholder-confidence language leaked into the body.
 
 ## Milestones
 
@@ -468,7 +473,7 @@ The older Anthropic Blink artifacts are retained only as evidence. They are not 
 - Define guide draft JSON schema.
 - Define and version the Sonnet 4.6 guide prompt.
 - Regenerate Claude drafts from the current canonical Blink Rx traces after transcript parser and frame-resolution fixes.
-- Move production guide generation to Azure Foundry Claude Sonnet 4.6 by provisioning the Foundry resource/deployment in `rg-kcxdocumentor-dev` and updating the Function App provider settings.
+- Keep production guide generation on Azure Foundry Claude Sonnet 4.6 through the Function App provider settings.
 - Generate sectioned user-guide content from procedure traces.
 - Render DOCX using local keycentrix assets.
 - Include selected screenshots with captions and step references.
@@ -483,7 +488,7 @@ The older Anthropic Blink artifacts are retained only as evidence. They are not 
 - Add no-placeholder-text strict scans for publishable guides.
 - Add golden scenarios for one-hour walkthroughs.
 - Add rendered DOCX visual QA workflow.
-- Add a customer-readiness review checklist for Anthropic outputs: body prose quality, actionability, screenshot relevance, reviewer-comment placement, and stale-artifact detection.
+- Add a customer-readiness review checklist for Claude outputs: body prose quality, actionability, screenshot relevance, reviewer-comment placement, and stale-artifact detection.
 
 ## Trace Versioning
 

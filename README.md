@@ -79,7 +79,7 @@ KCXDOC_AUTH_REDIRECT_URI=http://127.0.0.1:8765/
 
 Use **Logout** in the header to end the MSAL session and clear the local protected-media session.
 
-The app lists recordings from `samples/raw/`, processes a selected recording into `samples/processed/`, generates Anthropic guide drafts, builds DOCX files, and runs DOCX QA checks.
+The app lists recordings from the mapped recordings folder, processes a selected recording into the mapped processed-session folder, generates guide drafts, builds DOCX files, and runs DOCX QA checks.
 
 For step-by-step operator instructions, see `docs/user-guide.md`.
 
@@ -97,8 +97,8 @@ Then open `http://127.0.0.1:8765`.
 The image does not bundle Whisper at build time. By default the container bootstraps latest `whisper.cpp` into the mounted Whisper share at first startup, then reuses that folder:
 
 ```text
-KCXDOC_HOST_RAW_DIR=C:\KCXDocumentor\samples\raw
-KCXDOC_HOST_PROCESSED_DIR=C:\KCXDocumentor\samples\processed
+KCXDOC_HOST_RAW_DIR=C:\KCXDocumentor\recordings
+KCXDOC_HOST_PROCESSED_DIR=C:\KCXDocumentor\artifacts\processed
 KCXDOC_HOST_ARTIFACTS_DIR=C:\KCXDocumentor\artifacts
 KCXDOC_HOST_WHISPER_DIR=C:\KCXDocumentor\external\whisper
 KCXDOC_BOOTSTRAP_WHISPER=true

@@ -1269,3 +1269,52 @@ def test_local_generation_job_stops_when_draft_generation_fails(tmp_path: Path, 
     assert "AI draft generation failed" in job["error"]
     assert "Remote AI proxy request failed: HTTP 500" in job["error"]
     assert build_called is False
+
+
+def test_persist_generated_transcript_sidecar_writes_matching_raw_transcript(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    raw_root = tmp_path / "samples" / "raw"
+    session_dir = tmp_path / "samples" / "processed" / "demo-session"
+    raw_root.mkdir(parents=True)
+    session_dir.mkdir(parents=True)
+    recording = raw_root / "Demo Workflow.mp4"
+    recording.write_bytes(b"video")
+    transcript = {
+        "schemaVersion": 1,
+        "source": "local-whisper",
+        "sourceTranscript": {"name": "whisper-transcript.json"},
+        "segments": [{"id": "tx-0001", "text": "Open the workflow."}],
+    }
+    (session_dir / "transcript.json").write_text(json.dumps(transcript), encoding="utf-8")
+
+    monkeypatch.setattr(module, "RAW_ROOT", raw_root)
+
+    sidecar = module.persist_generated_transcript_sidecar(recording, session_dir)
+
+    assert sidecar
+    assert sidecar["name"] == "Demo Workflow.whisper-transcript.json"
+    sidecar_path = raw_root / sidecar["name"]
+    assert sidecar_path.exists()
+    payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    assert payload["source"] == "local-whisper"
+    assert payload["recordingName"] == "Demo Workflow.mp4"
+    assert payload["sourceSessionId"] == "demo-session"
+
+
+def test_persist_generated_transcript_sidecar_skips_sidecar_transcripts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app_server()
+    raw_root = tmp_path / "samples" / "raw"
+    session_dir = tmp_path / "samples" / "processed" / "demo-session"
+    raw_root.mkdir(parents=True)
+    session_dir.mkdir(parents=True)
+    recording = raw_root / "Demo Workflow.mp4"
+    recording.write_bytes(b"video")
+    (session_dir / "transcript.json").write_text(
+        json.dumps({"schemaVersion": 1, "source": "sidecar-transcript", "segments": [{"text": "Already had a sidecar."}]}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(module, "RAW_ROOT", raw_root)
+
+    assert module.persist_generated_transcript_sidecar(recording, session_dir) is None
+    assert not (raw_root / "Demo Workflow.whisper-transcript.json").exists()

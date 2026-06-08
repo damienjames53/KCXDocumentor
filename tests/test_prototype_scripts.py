@@ -1173,6 +1173,112 @@ def test_prepare_trace_for_anthropic_compacts_ocr_payload() -> None:
     assert len(segment["candidateImages"][0]["reason"]) <= 220
 
 
+def test_generation_quality_rules_block_zero_transcript_without_segment_steps() -> None:
+    module = load_module(GUIDE_DRAFT_SCRIPT, "generate_guide_draft_zero_transcript_rules")
+    trace = {
+        "sessionId": "zero-transcript",
+        "recording": {
+            "sourceFile": "samples/raw/KCX Bootcamp-Retail Specialty Workflow.mp4",
+            "durationSeconds": 2068,
+            "captureMode": "imported-recording",
+        },
+        "segments": [
+            {"id": f"seg-{index:04d}", "speakerText": "", "confidence": {"transcript": 0.0}, "candidateImages": []}
+            for index in range(27)
+        ],
+    }
+    draft = {
+        "schemaVersion": 1,
+        "title": "Retail Specialty Workflow",
+        "steps": [{"title": "Bad model segment step"} for _ in range(27)],
+    }
+
+    normalized = module.enforce_generation_quality_rules(draft, trace)
+
+    assert normalized["overallStatus"] == "BLOCKED — No transcript available."
+    assert len(normalized["steps"]) == 4
+    assert len(normalized["steps"]) < len(trace["segments"])
+    assert {step["title"] for step in normalized["steps"]} == {"PLACEHOLDER — requires transcript"}
+    assert {step["instruction"] for step in normalized["steps"]} == {"PLACEHOLDER — requires transcript"}
+    review = normalized["openReviewItems"][0]
+    assert review["id"] == "review-001"
+    assert review["severity"] == "critical"
+    assert review["totalSegmentCount"] == 27
+    assert review["recordingDuration"] == "34 minutes 28 seconds"
+    assert "No usable transcript was extracted" in review["description"]
+    assert normalized["sourceRecording"] == {
+        "fileName": "KCX Bootcamp-Retail Specialty Workflow.mp4",
+        "sourceFile": "samples/raw/KCX Bootcamp-Retail Specialty Workflow.mp4",
+        "duration": "34 minutes 28 seconds",
+        "durationSeconds": 2068.0,
+        "captureMode": "imported-recording",
+    }
+
+
+def test_generation_quality_rules_consolidate_systemic_screenshot_failure_and_cadence() -> None:
+    module = load_module(GUIDE_DRAFT_SCRIPT, "generate_guide_draft_screenshot_consolidation")
+    trace = {
+        "recording": {
+            "sourceFile": "samples/raw/demo.mp4",
+            "durationSeconds": 3600,
+            "captureMode": "imported-recording",
+        },
+        "segments": [
+            {
+                "id": "seg-0001",
+                "speakerText": "Open the request.",
+                "confidence": {"transcript": 0.9},
+                "candidateImages": [
+                    {
+                        "frameId": "frame-0001",
+                        "timestampSeconds": 60,
+                        "reviewStatus": "pending",
+                        "confidence": 0.9,
+                        "ocrText": "Open Request",
+                    }
+                ],
+            },
+            {
+                "id": "seg-0002",
+                "speakerText": "Submit it.",
+                "confidence": {"transcript": 0.9},
+                "candidateImages": [
+                    {
+                        "frameId": "frame-0002",
+                        "timestampSeconds": 90,
+                        "reviewStatus": "pending",
+                        "confidence": 0.9,
+                        "ocrText": "Submit",
+                    }
+                ],
+            },
+        ],
+    }
+    draft = {
+        "schemaVersion": 1,
+        "title": "Demo Guide",
+        "sourceRecording": {"sourceFile": "demo.mp4", "durationSeconds": 3600},
+        "steps": [
+            {"title": "Open request", "instruction": "Open the request.", "selectedScreenshot": {"timestampSeconds": 60}},
+            {"title": "Submit request", "instruction": "Submit the request.", "selectedScreenshot": {"timestampSeconds": 90}},
+        ],
+    }
+
+    normalized = module.enforce_generation_quality_rules(draft, trace)
+
+    review_by_id = {item["id"]: item for item in normalized["openReviewItems"]}
+    assert review_by_id["review-001"]["recordingDuration"] == "1 hour"
+    assert review_by_id["review-002"]["severity"] == "critical"
+    assert review_by_id["review-002"]["description"] == "All candidate screenshots are pending review."
+    assert "cadence-based" in review_by_id["review-003"]["description"]
+    for step in normalized["steps"]:
+        assert step["screenshotDecision"] == {
+            "needsHumanReview": True,
+            "reviewNote": "See review-002.",
+            "screenshotRef": None,
+        }
+
+
 def test_anthropic_payload_excludes_rejected_frame_candidates_but_keeps_notes(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_module(GUIDE_DRAFT_SCRIPT, "generate_guide_draft_payload_contract")
     captured: dict[str, object] = {}

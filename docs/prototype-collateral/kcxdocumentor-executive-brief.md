@@ -15,7 +15,7 @@ The current build demonstrates:
 - Local video processing through FFmpeg, Whisper, and frame extraction.
 - Human-in-the-loop screenshot review before guide generation.
 - Authenticated Microsoft Entra sign-in using MSAL + PKCE.
-- A serverless Azure Function proxy for Anthropic API calls.
+- A serverless Azure Function proxy for Azure Foundry Claude calls.
 - Cosmos-backed AI Spend reporting by user, document, tokens, pages, and estimated cost.
 - Dockerized deployment using a private GitHub Container Registry image.
 - Windows-friendly host folder mapping for recordings, generated guides, and Whisper assets.
