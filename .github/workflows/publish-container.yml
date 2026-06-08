@@ -27,7 +27,7 @@ permissions:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   REGISTRY: ghcr.io
-  IMAGE_NAME: ghcr.io/keycentrix/kcxdocumentor
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/kcxdocumentor
   PACKAGE_NAME: kcxdocumentor
 
 jobs:
